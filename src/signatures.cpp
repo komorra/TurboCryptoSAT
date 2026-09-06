@@ -21,6 +21,37 @@ inline uint64_t popcount64(uint64_t x) {
 #endif
 }
 
+// Decides whether the recovered circuit can stand in for propagation, and
+// turns the fixed literals into a per variable value while it is at it.
+//
+// Two things have to hold. The network must account for every clause, so that
+// any valuation of the free variables extends to a satisfying assignment - a
+// residual clause could be violated by an execution, and the whole point of the
+// fast path is that it never has to retry. And every fixed literal must land on
+// a free variable, where honouring it is just a matter of not randomising it;
+// a literal pinning a gate output would need the circuit run backwards, which
+// is exactly the search the solver is trying to avoid.
+const GateNetwork* usableNetwork(const GateNetwork* net, const Cnf& cnf,
+                                 const std::vector<Lit>& fixedLits,
+                                 std::vector<int8_t>& fixedVals) {
+    if (!net || !net->complete()) return nullptr;
+    if (net->clauseCount != cnf.clauseCount()) return nullptr;
+    if (static_cast<int>(net->isFree.size()) != cnf.numVars) return nullptr;
+
+    fixedVals.assign(static_cast<size_t>(cnf.numVars), 0);
+    for (Lit l : fixedLits) {
+        const Var v = litVar(l);
+        if (v < 0 || v >= cnf.numVars) return nullptr;
+        if (!net->isFree[static_cast<size_t>(v)]) return nullptr;
+        const int8_t want = litSign(l) ? -1 : 1;
+        if (fixedVals[static_cast<size_t>(v)] != 0 && fixedVals[static_cast<size_t>(v)] != want) {
+            return nullptr;  // the fixed literals contradict each other
+        }
+        fixedVals[static_cast<size_t>(v)] = want;
+    }
+    return net;
+}
+
 }  // namespace
 
 bool Signatures::generate(const Cnf& cnf, const std::vector<Lit>& fixedLits,
@@ -29,36 +60,76 @@ bool Signatures::generate(const Cnf& cnf, const std::vector<Lit>& fixedLits,
     words_ = std::max(1, cfg.words);
     numVars_ = cnf.numVars;
 
+    std::vector<int8_t> fixedVals;
+    const GateNetwork* net = gateDisabled_ ? nullptr
+                                           : usableNetwork(cfg.gates, cnf, fixedLits, fixedVals);
     const size_t cells = static_cast<size_t>(numVars_) * static_cast<size_t>(words_);
-    try {
-        sig_.assign(cells, 0);
-        def_.assign(cells, 0);
-        valid_.assign(static_cast<size_t>(words_), 0);
-    } catch (const std::bad_alloc&) {
-        error = "not enough memory for the signature table; lower --siglen";
-        return false;
-    }
 
-    int threads = std::max(1, cfg.threads);
-    threads = std::min(threads, words_);
+    // The clause check only has to run once. The gate list is the same on every
+    // redraw and its execution is lane independent, so a population that came
+    // out clean vouches for the network itself, not just for those lanes.
+    bool verify = !gateVerified_;
 
-    std::vector<std::thread> pool;
-    pool.reserve(static_cast<size_t>(threads));
-    const int per = (words_ + threads - 1) / threads;
-    for (int t = 0; t < threads; ++t) {
-        const int b = t * per;
-        const int e = std::min(words_, b + per);
-        if (b >= e) break;
-        const uint64_t seed = cfg.seed ^ (0x9E3779B97F4A7C15ull * static_cast<uint64_t>(t + 1));
-        if (t + 1 == threads) {
-            generateChunk(cnf, fixedLits, inputVars, cfg.maxRounds, b, e, seed, cfg.cancelled);
+    auto runPass = [&](bool useGates) {
+        try {
+            sig_.assign(cells, 0);
+            // Executing a circuit never leaves a variable undecided, so the
+            // fast path needs no assigned mask - and with it goes half the
+            // memory.
+            if (useGates) std::vector<uint64_t>().swap(def_);
+            else def_.assign(cells, 0);
+            valid_.assign(static_cast<size_t>(words_), 0);
+        } catch (const std::bad_alloc&) {
+            error = "not enough memory for the signature table; lower --siglen";
+            return false;
+        }
+
+        int threads = std::max(1, cfg.threads);
+        threads = std::min(threads, words_);
+
+        std::vector<std::thread> pool;
+        pool.reserve(static_cast<size_t>(threads));
+        const int per = (words_ + threads - 1) / threads;
+        for (int t = 0; t < threads; ++t) {
+            const int b = t * per;
+            const int e = std::min(words_, b + per);
+            if (b >= e) break;
+            const uint64_t seed = cfg.seed ^ (0x9E3779B97F4A7C15ull * static_cast<uint64_t>(t + 1));
+            auto run = [&, b, e, seed] {
+                if (useGates) {
+                    gateChunk(cnf, *net, fixedVals, b, e, seed, verify);
+                } else {
+                    generateChunk(cnf, fixedLits, inputVars, cfg.maxRounds, b, e, seed,
+                                  cfg.cancelled);
+                }
+            };
+            if (t + 1 == threads) run();
+            else pool.emplace_back(run);
+        }
+        for (auto& th : pool) th.join();
+
+        validSamples_ = 0;
+        for (uint64_t w : valid_) validSamples_ += popcount64(w);
+        return true;
+    };
+
+    gateSampling_ = net != nullptr;
+    if (!runPass(gateSampling_)) return false;
+
+    if (gateSampling_ && verify) {
+        if (validSamples_ == sampleCount()) {
+            gateVerified_ = true;
         } else {
-            pool.emplace_back([&, b, e, seed] {
-                generateChunk(cnf, fixedLits, inputVars, cfg.maxRounds, b, e, seed, cfg.cancelled);
-            });
+            // A lane that fails a clause means the recovered network is not the
+            // formula after all - a pattern was matched that does not mean what
+            // it looked like. Rather than solve on a poisoned population, drop
+            // the fast path for good and redraw by propagation.
+            gateDisabled_ = true;
+            gateSampling_ = false;
+            verify = false;
+            if (!runPass(false)) return false;
         }
     }
-    for (auto& th : pool) th.join();
 
     validSamples_ = 0;
     for (uint64_t w : valid_) validSamples_ += popcount64(w);
@@ -95,7 +166,76 @@ void Signatures::disable(int numVars, int words) {
     probeT_.clear();
     probeWords_ = 0;
     validSamples_ = 0;
+    gateSampling_ = false;
     std::vector<uint64_t>().swap(def_);
+}
+
+void Signatures::gateChunk(const Cnf& cnf, const GateNetwork& net,
+                           const std::vector<int8_t>& fixedVals, int wordBegin, int wordEnd,
+                           uint64_t seed, bool verify) {
+    const int words = words_;
+    uint64_t* sig = sig_.data();
+    Rng rng(seed);
+
+    // The free variables are the whole of the randomness; a fixed one is simply
+    // not randomised, which is how a unit clause is honoured here.
+    for (Var v : net.freeVars) {
+        uint64_t* row = sig + static_cast<size_t>(v) * static_cast<size_t>(words);
+        const int8_t f = fixedVals[static_cast<size_t>(v)];
+        if (f == 0) {
+            for (int w = wordBegin; w < wordEnd; ++w) row[w] = rng.next();
+        } else {
+            const uint64_t bits = f > 0 ? ~0ull : 0ull;
+            for (int w = wordBegin; w < wordEnd; ++w) row[w] = bits;
+        }
+    }
+
+    // One forward pass in topological order. Every lane of every variable is
+    // decided by the time the pass ends, no lane can conflict, and nothing is
+    // ever revisited - which is the whole difference to propagating clauses.
+    for (const Gate& g : net.gates) {
+        const uint64_t* a = sig + static_cast<size_t>(litVar(g.in0)) * static_cast<size_t>(words);
+        const uint64_t* b = sig + static_cast<size_t>(litVar(g.in1)) * static_cast<size_t>(words);
+        uint64_t* o = sig + static_cast<size_t>(g.out) * static_cast<size_t>(words);
+        const uint64_t na = litSign(g.in0) ? ~0ull : 0ull;
+        const uint64_t nb = litSign(g.in1) ? ~0ull : 0ull;
+        const uint64_t no = g.negOut ? ~0ull : 0ull;
+        if (g.op == Gate::And) {
+            for (int w = wordBegin; w < wordEnd; ++w) o[w] = ((a[w] ^ na) & (b[w] ^ nb)) ^ no;
+        } else {
+            // Every polarity flip of an XOR folds into a single constant.
+            const uint64_t k = na ^ nb ^ no;
+            for (int w = wordBegin; w < wordEnd; ++w) o[w] = a[w] ^ b[w] ^ k;
+        }
+    }
+
+    // The network was accepted only because it accounts for every clause, so
+    // this pass is a check of that claim rather than a filter: it should leave
+    // every lane standing. Running it once keeps a mistake in the pattern
+    // matching from quietly poisoning the sample population, which the solver
+    // has no way to detect on its own.
+    for (int w = wordBegin; w < wordEnd; ++w) valid_[static_cast<size_t>(w)] = ~0ull;
+    if (!verify) return;
+
+    const size_t nc = cnf.clauseCount();
+    const uint32_t* cstart = cnf.start.data();
+    const Lit* clits = cnf.lits.data();
+    for (size_t c = 0; c < nc; ++c) {
+        const uint32_t from = cstart[c];
+        const uint32_t len = cstart[c + 1] - from;
+        const Lit* b = clits + from;
+        for (int w = wordBegin; w < wordEnd; ++w) {
+            uint64_t sat = 0;
+            for (uint32_t i = 0; i < len; ++i) {
+                const Lit l = b[i];
+                const uint64_t row =
+                    sig[static_cast<size_t>(litVar(l)) * static_cast<size_t>(words) +
+                        static_cast<size_t>(w)];
+                sat |= (l & 1) ? ~row : row;
+            }
+            valid_[static_cast<size_t>(w)] &= sat;
+        }
+    }
 }
 
 void Signatures::generateChunk(const Cnf& cnf, const std::vector<Lit>& fixedLits,

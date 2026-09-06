@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "cnf.h"
+#include "gates.h"
 #include "options.h"
 #include "propagator.h"
 #include "rng.h"
@@ -51,6 +52,8 @@ struct SolveStats {
     uint64_t validSamples = 0;
     uint64_t totalSamples = 0;
     uint64_t signatureBytes = 0;
+    uint64_t gates = 0;          // gates recovered from the clauses
+    bool gateSampling = false;   // samples produced by executing them
 };
 
 struct SolveResult {
@@ -75,6 +78,7 @@ public:
     const Propagator& master() const { return master_; }
     const SolveStats& stats() const { return stats_; }
     const std::vector<Var>& inputVars() const { return inputVars_; }
+    const GateNetwork& gateNetwork() const { return gateNet_; }
     size_t targetLitCount() const { return targetLits_.size(); }
 
 private:
@@ -99,6 +103,9 @@ private:
     // the unit clauses, since those either pin the target outputs or are handed
     // to the generator as fixed literals.
     Cnf sampleCnf_;
+    // The circuit read back out of `sampleCnf_`, when there was one. A complete
+    // network is what the sample generator runs instead of propagating.
+    GateNetwork gateNet_;
     Options opt_;
     Propagator master_;
     Signatures sig_;

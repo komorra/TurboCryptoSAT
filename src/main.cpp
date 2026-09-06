@@ -395,6 +395,8 @@ RunOutcome runInstance(const Options& opt, const std::string& path, bool interac
         model.totalSamples = st.totalSamples;
         model.sigBytes = st.signatureBytes;
         model.inputVarCount = static_cast<int>(solver.inputVars().size());
+        model.gates = st.gates;
+        model.gateSampling = st.gateSampling;
         model.res = lastRes;
 
         if (ui.enabled()) {
@@ -452,6 +454,12 @@ void printSummary(const RunOutcome& r, const std::string& path) {
         std::printf("  detail       %s\n", r.result.message.c_str());
     }
     std::printf("  attempts     %u (restarts %u)\n", s.attempt, s.restarts);
+    if (s.gateSampling) {
+        std::printf("  circuit      %llu gates recovered, samples executed\n",
+                    static_cast<unsigned long long>(s.gates));
+    } else {
+        std::printf("  circuit      not recovered, samples built by propagation\n");
+    }
     std::printf("  samples      %llu / %llu lanes in %.2fs\n",
                 static_cast<unsigned long long>(s.validSamples),
                 static_cast<unsigned long long>(s.totalSamples), s.sampleSeconds);

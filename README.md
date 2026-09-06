@@ -24,10 +24,13 @@ A CDCL solver explores an assignment tree. TurboCryptoSAT does not: it fills the
 **in place**, one batch of implied literals at a time, and never backtracks. What lets it get
 away with that is a population of samples.
 
-1. **Sample.** The input variables of the encoded circuit are given random values and unit
-   propagation is run — 65 536 times in parallel, every variable holding a bit vector of
-   `sigLen` 64-bit lanes. The result is a population of complete assignments that all satisfy
-   the circuit, but not the target output valuation.
+1. **Sample.** The input variables of the encoded circuit are given random values and the rest
+   of the assignment is derived — 65 536 times in parallel, every variable holding a bit vector
+   of `sigLen` 64-bit lanes. The result is a population of complete assignments that all satisfy
+   the circuit, but not the target output valuation. Where the formula turns out to *be* a
+   circuit, the gates are read back out of the clauses and simply executed; otherwise the
+   population is built by bit-parallel unit propagation. See
+   [Sampling by executing the circuit](#sampling-by-executing-the-circuit).
 2. **Probe.** Pick an unassigned variable and propagate both of its polarities. Two sound
    things fall out at once: a polarity whose propagation conflicts is refuted outright, and
    whatever the surviving polarities propagate *in common* holds regardless of which one is
@@ -54,8 +57,9 @@ attempt halves `initk`, walking from aggressive to conservative.
 ```
                      ONCE, BEFORE SOLVING
    instance.cnf   +----------------------------------------------+
-   ------------>  |  random values for the input variables       |
-                  |  + bit-parallel unit propagation             |
+   ------------>  |  recover the gates from the clauses          |
+                  |  + random values for the free inputs         |
+                  |  + one bit-parallel pass in topological order |
                   |  = signature table: one 65536-bit vector      |
                   |    per variable, sampling the circuit        |
                   +-----------------------+----------------------+
@@ -72,6 +76,56 @@ attempt halves `initk`, walking from aggressive to conservative.
                                           |
         both polarities refuted           v
         -----> restart attempt   commit + propagate ----> repeat
+```
+
+### Sampling by executing the circuit
+
+The population is the expensive part of a run: it is built before the first probe, again on
+every restart, and again whenever the solver stalls and decides fresh randomness is a better
+answer than a guess. Built by unit propagation it means sweeping the whole formula until every
+lane settles — on 17-round SHA-256 (24 765 variables, 82 564 clauses) about **1.3 s** per
+population, which is enough to make redrawing one a decision rather than a reflex.
+
+A Tseitin-encoded circuit does not have to be propagated, though. It can be *run*. So before
+solving, the clauses are matched against the two definition shapes an AND/OR/XOR encoder emits:
+
+```
+o == x & y     (~o | x), (~o | y), (o | ~x | ~y)
+o == x ^ y     the four ternary clauses over {o,x,y} that forbid one parity
+```
+
+Both polarities of the output are tried, so OR, NAND, NOR and XNOR are these same two patterns
+with literals negated. What is found is then ordered: a variable no definition claims becomes a
+free input, and a definition is accepted once all of its inputs are known, which yields a
+topological order — and breaks a cycle by freeing a variable rather than closing it.
+
+Generating a population is then a single forward pass: random words into the free variables,
+one `&` or `^` per gate per 64-lane word, nothing revisited. No conflicts, no retry rounds, and
+no assigned mask, since executing a circuit leaves nothing undecided — every lane is a valid
+sample by construction, and the table needs half the memory.
+
+| `24-sha256-r17-c03.cnf`, 32 threads | propagating | executing |
+| --- | --- | --- |
+| first population | 1.3 s | 0.18 s |
+| every redraw after it | 1.3 s | 0.03 s |
+| valid lanes | 65 536 | 65 536 |
+
+The fast path is used only when the recovered network accounts for **every** clause, so that
+any valuation of the free variables extends to a satisfying assignment. On top of that, the
+first population it produces is checked clause by clause across all 65 536 lanes — that check
+is the 0.15 s difference between the two rows above, and it only has to run once, since the
+gate list is the same on every redraw. If a single lane fails it, the recovered network is not
+the formula after all: the fast path is dropped for the rest of the run and the propagating
+generator takes over. It also steps aside when `--outputs` pins a gate output, because
+honouring that means constraining the samples rather than merely running the circuit, and on
+anything without recognisable gate structure — random 3-SAT — where the clauses left over
+disqualify the network immediately.
+
+The summary line reports which of the two ran:
+
+```
+  circuit      24741 gates recovered, samples executed
+  circuit      not recovered, samples built by propagation
 ```
 
 ## Building
@@ -323,7 +377,8 @@ The summary after every run is meant to be read as a diagnosis.
 | Many probes, few productive, low `probes short of samples` | The filter is too wide: thousands of samples survive and nothing looks constant | Raise `--initk` |
 | Restarts early and often | Statistical verdicts are firing on biased variables | Raise `--siglen`, or start from a lower `--initk` |
 | Progress stalls, few guesses | Nothing left for the probes to find | Raise `--probe-vars` to 2, or lower `--stall-limit` |
-| Out of memory | The table is `numVars * sigLen * 8` bytes, twice that while it is being built | Lower `--siglen` |
+| Out of memory | The table is `numVars * sigLen * 8` bytes, twice that while a propagated population is being built | Lower `--siglen` |
+| `circuit` says `not recovered` on an instance that is one | Some clauses fall outside the two gate patterns, so the population is propagated instead of executed | Nothing to turn; sampling is slower but the result is the same |
 
 ## Limitations
 

@@ -52,6 +52,8 @@ struct UiModel {
     uint64_t totalSamples = 0;
     uint64_t sigBytes = 0;
     int inputVarCount = 0;
+    uint64_t gates = 0;            // recovered gates, 0 when the fast path is off
+    bool gateSampling = false;
 
     ResourceSnapshot res;
 };

@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "cnf.h"
+#include "gates.h"
 
 namespace tcs {
 
@@ -25,6 +26,12 @@ struct SignatureConfig {
     uint64_t seed = 0;
     int threads = 1;
     int maxRounds = 12;   // retry rounds for lanes that hit a conflict
+
+    // Recovered circuit, when the formula turned out to be one. A complete
+    // network replaces propagation entirely: the samples are produced by
+    // executing the gates, which is what makes resampling cheap enough to be
+    // the solver's default answer to a stall.
+    const GateNetwork* gates = nullptr;
 
     // Polled once per retry round so a timeout or Ctrl+C is not held up by a
     // long sampling pass. Lanes generated so far are kept.
@@ -46,6 +53,9 @@ public:
     void disable(int numVars, int words);
 
     int words() const { return words_; }
+    // True when the population was produced by executing a recovered circuit
+    // rather than by propagating the clauses.
+    bool gateSampling() const { return gateSampling_; }
     size_t sampleCount() const { return static_cast<size_t>(words_) * 64; }
     uint64_t validSamples() const { return validSamples_; }
 
@@ -69,6 +79,12 @@ public:
     }
 
 private:
+    // Executes the recovered circuit over one range of lanes, then clears from
+    // the valid mask every lane that fails a clause - the network is only used
+    // when it accounts for the whole formula, so this is a check, not a filter.
+    void gateChunk(const Cnf& cnf, const GateNetwork& net, const std::vector<int8_t>& fixedVals,
+                   int wordBegin, int wordEnd, uint64_t seed, bool verify);
+
     void generateChunk(const Cnf& cnf, const std::vector<Lit>& fixedLits,
                        const std::vector<Var>& inputVars, int maxRounds,
                        int wordBegin, int wordEnd, uint64_t seed,
@@ -82,6 +98,9 @@ private:
     std::vector<uint64_t> probeT_;  // probeWords_ * numVars, transposed
     int probeWords_ = 0;
     uint64_t validSamples_ = 0;
+    bool gateSampling_ = false;
+    bool gateVerified_ = false;   // the network has been checked against the clauses
+    bool gateDisabled_ = false;   // ...and failed, so never use it again
 };
 
 }  // namespace tcs

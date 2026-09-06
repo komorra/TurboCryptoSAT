@@ -181,11 +181,14 @@ void Solver::buildSampleCnf() {
 
 bool Solver::buildSignatures(std::string& error) {
     // The table needs numVars * sigLen words, and twice that while the assigned
-    // mask is still alive. Say so up front rather than dying in the allocator.
+    // mask is still alive - executing a recovered circuit needs no such mask,
+    // since it leaves nothing undecided. Say so up front rather than dying in
+    // the allocator.
     {
         ResourceMonitor rm;
         const ResourceSnapshot snap = rm.sample();
-        const uint64_t need = 2ull * static_cast<uint64_t>(cnf_.numVars) *
+        const uint64_t tables = gateNet_.complete() ? 1ull : 2ull;
+        const uint64_t need = tables * static_cast<uint64_t>(cnf_.numVars) *
                               static_cast<uint64_t>(opt_.sigLen) * 8ull;
         if (snap.totalRamBytes && need > snap.totalRamBytes) {
             error = "the sample table would need " + formatBytes(need) + " but the machine has " +
@@ -199,6 +202,7 @@ bool Solver::buildSignatures(std::string& error) {
     cfg.seed = rng_.next();
     cfg.threads = opt_.threads;
     cfg.maxRounds = opt_.sampleRounds;
+    cfg.gates = &gateNet_;
     cfg.cancelled = [this] {
         if (interruptRequested()) return true;
         return opt_.timeout > 0.0 &&
@@ -211,6 +215,8 @@ bool Solver::buildSignatures(std::string& error) {
     stats_.validSamples = sig_.validSamples();
     stats_.totalSamples = sig_.sampleCount();
     stats_.signatureBytes = sig_.memoryBytes();
+    stats_.gateSampling = sig_.gateSampling();
+    stats_.gates = sig_.gateSampling() ? gateNet_.gates.size() : 0;
     return true;
 }
 
@@ -704,6 +710,10 @@ SolveResult Solver::solve() {
         return res;
     }
     buildSampleCnf();
+    // Reading the gates back is linear in the formula and pays for itself many
+    // times over: a circuit is executed once per population instead of being
+    // propagated, which is what makes a redraw cheap enough to lean on.
+    extractGates(sampleCnf_, gateNet_);
     detectInputs();
     const size_t baseTrail = master_.mark();
 

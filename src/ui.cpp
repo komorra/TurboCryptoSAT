@@ -250,6 +250,13 @@ void Ui::buildStatus(const UiModel& m, int width) {
     field("tuning", buf);
     std::snprintf(buf, sizeof(buf), "%d", m.inputVarCount);
     field("input vars", buf);
+    if (m.gateSampling) {
+        std::snprintf(buf, sizeof(buf), fmt("%llu (samples executed)", "%llu exec"),
+                      static_cast<unsigned long long>(m.gates));
+    } else {
+        std::snprintf(buf, sizeof(buf), fmt("none (samples propagated)", "none"));
+    }
+    field("gates", buf);
     blank();
 
     std::snprintf(buf, sizeof(buf), "%d", m.threads);
