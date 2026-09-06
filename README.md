@@ -180,24 +180,29 @@ clauses become satisfied. The right pane is the run status.
 
 ```
  TurboCryptoSAT  |  solving  |  signature propagation
- ###############################+++++++::.....  |  STATUS
- ##########################+++++::::...           |
- #####################+++++:::....                |   attempt      2 / 5
- ################+++++::::...                     |   variables    9218 / 24765  (37.2%)
- ###########++++::::..                            |   [=======               ]
- ######++++::::..                                 |   clauses sat  31585 / 82564  (38.3%)
- ###++++:::...                                    |   [========              ]
- ...                                              |   elapsed      00:01:26
-                                                  |   eta          00:03:41
-                                                  |   rate         42.7 vars/s
-                                                  |   probes       2752992 (ok 1446, rej 0)
-                                                  |   guesses      1073    restarts 3
-                                                  |   samples      65536 / 65536 lanes
-                                                  |   tuning       sigLen 1024 initk 8 mink 32
-                                                  |   threads      16
-                                                  |   cpu          1489 %
-                                                  |   memory       412 MB / 32 GB
- clause map: sorted by length then first variable; # satisfied . open
+###:............................................ | STATUS
+................................................ |
+......................................:......... | attempt      1 / 5
+......-#..........................+:....:....... | variables    7588 / 24765  (30.6%)
+.............+:...:-....................+-----+: | [========                   ]
+::.....:...*:.+-...*#--+++---:....::.:++-*+:::+* | clauses sat  26473 / 82564  (32.1%)
++++*+++++....:----####:::-#####*++++-::..#---### | [=========                  ]
+###########*#**-:+.:#---###############*#-*+--#+ |
+-+###############:+::*::+#--*################:.. | elapsed      00:00:11
+................................................ | eta          00:51:43
+................................................ | rate         5.5 vars/s
+................................................ |
+................................................ | probes       263520 (ok 91, rej 0)
+......................:...............:++-...... | guesses      3    restarts 0
+..............................-++............... | resamples    1
+.....................:++::.:::.:-............... |
+.............*****++++--:.:..:.....--...-:.-++.. | samples      65536 / 65536 lanes
+.:..+###*+++*+---::::......+:.::*--*+::-::::###* | tuning       sigLen 1024  initk 8  mink 32
+***+#*+------:....++++++##*++::::::*##########+- | input vars   24
+----+..:.:#++++######################++++--*:.+. |
+:#*+++#####################+**++++:---+#++++#### | threads      32
+################*++**++:..-:.+#*++*############# | cpu          1441 %
+ clause map: sorted by length then first variable; # satisfied  . open
  press Ctrl+C or ESC ESC to abort
 ```
 
@@ -233,16 +238,51 @@ or point the solver at any directory of `.cnf` files:
 turbocryptosat benchmark path/to/instances --no-ui --timeout 300
 ```
 
-It prints a per-instance line as it goes and a summary table at the end:
+It prints a per-instance line as it goes and a summary table at the end. This is the whole
+suite on a 16-core / 32-thread desktop, default settings, 60 seconds per instance:
 
 ```
 +------------------------------------+---------+---------+------------+-----+----------+----------+------------+
 | instance                           |    vars | clauses | status     | att |  sample  |   total  |     probes |
 +------------------------------------+---------+---------+------------+-----+----------+----------+------------+
-| 09-circuit-i24-g300.cnf            |     322 |     981 | SOLVED     |   1 |    0.01s |    0.17s |      25344 |
-| 24-sha256-r17-c03.cnf              |   24765 |   82564 | SOLVED     |   2 |    2.31s |   94.60s |    1204832 |
+| 01-rand3sat-n060.cnf               |      60 |     252 | SOLVED     |   2 |    0.18s |    4.13s |     609056 |
+| 02-rand3sat-n100.cnf               |     100 |     420 | SOLVED     |   2 |    0.81s |   12.45s |    1570752 |
+| 03-rand3sat-n150.cnf               |     150 |     630 | EXHAUSTED  |   5 |    1.25s |   18.91s |    2404768 |
+| 04-rand3sat-n220.cnf               |     220 |     924 | EXHAUSTED  |   5 |    2.12s |   25.19s |    3110496 |
+| 05-rand3sat-n320.cnf               |     320 |    1360 | EXHAUSTED  |   5 |    3.42s |   36.55s |    4488992 |
+| 06-rand3sat-n450.cnf               |     450 |    1912 | TIMEOUT    |   5 |    5.96s |   60.00s |    7218176 |
+| 07-rand3sat-n650.cnf               |     650 |    2769 | TIMEOUT    |   4 |    7.01s |   60.00s |    7040800 |
+| 08-rand3sat-n900.cnf               |     900 |    3834 | TIMEOUT    |   3 |    5.36s |   60.00s |    7192800 |
+| 09-circuit-i24-g300.cnf            |     322 |     981 | SOLVED     |   1 |    0.32s |    9.59s |    1169376 |
+| 10-circuit-i32-g600.cnf            |     625 |    1959 | SOLVED     |   1 |    0.08s |    1.37s |     162496 |
+| 11-circuit-i48-g1200.cnf           |    1242 |    3921 | SOLVED     |   1 |    0.17s |    2.75s |     318080 |
+| 12-circuit-i64-g2000.cnf           |    2059 |    6571 | SOLVED     |   2 |    1.85s |   14.36s |    1463712 |
+| 13-circuit-i96-g3500.cnf           |    3594 |   11420 | SOLVED     |   1 |    0.52s |    4.70s |     505568 |
+| 14-circuit-i128-g6000.cnf          |    6125 |   19631 | SOLVED     |   2 |    1.11s |    7.68s |     738656 |
+| 15-xorcircuit-i24-g200.cnf         |     223 |     757 | SOLVED     |   1 |    0.06s |    2.05s |     256320 |
+| 16-xorcircuit-i32-g400.cnf         |     430 |    1502 | SOLVED     |   1 |    0.07s |    1.30s |     160832 |
+| 17-xorcircuit-i48-g800.cnf         |     846 |    3000 | TIMEOUT    |   3 |    1.54s |   60.00s |    7450912 |
+| 18-xorcircuit-i64-g1500.cnf        |    1562 |    5586 | TIMEOUT    |   2 |    4.25s |   60.00s |    6144128 |
+| 19-xorcircuit-i96-g2500.cnf        |    2590 |    9351 | TIMEOUT    |   1 |    2.78s |   60.00s |    5594560 |
+| 20-xorcircuit-i128-g4000.cnf       |    4125 |   14908 | TIMEOUT    |   1 |    8.19s |   60.00s |    4021760 |
+| 21-sha256-r08-c03.cnf              |   10490 |   35148 | SOLVED     |   1 |    0.50s |    0.51s |          0 |
+| 22-sha256-r11-c03.cnf              |   15177 |   50723 | SOLVED     |   1 |    0.73s |    0.75s |          0 |
+| 23-sha256-r14-c03.cnf              |   19894 |   66389 | SOLVED     |   1 |    0.96s |    0.98s |          0 |
+| 24-sha256-r17-c03.cnf              |   24765 |   82564 | TIMEOUT    |   1 |    9.46s |   60.01s |    1301856 |
+| 25-sha256-r20-c03.cnf              |   29725 |   99060 | TIMEOUT    |   1 |    8.66s |   60.01s |    1121760 |
+| 26-sha256-r17-c04.cnf              |   25264 |   84217 | TIMEOUT    |   1 |    9.76s |   60.01s |    1297440 |
 +------------------------------------+---------+---------+------------+-----+----------+----------+------------+
+
+solved 13 / 26 instances in 743.30s
 ```
+
+Read across the families rather than down the rows. The circuits it was built for fall in
+seconds. Reduced-round SHA-256 up to 14 rounds is finished by propagation from the pinned
+digest before the sample layer is even consulted — note the zero probe count — while 17 and 20
+rounds are past what it reaches in a minute; it gets roughly a third of the way and slows down.
+The XOR-heavy circuits split sharply: small ones fall, and from 48 inputs up the parity
+structure leaves both propagation and the samples with nothing to intersect. Random 3-SAT is
+the acknowledged worst case and behaves like it.
 
 ### Tests
 
@@ -280,6 +320,12 @@ The summary after every run is meant to be read as a diagnosis.
   recovery mechanism, and they are not guaranteed to succeed.
 * **Needs a driving input set.** On instances with no such structure (random k-SAT) the sample
   population collapses and the solver falls back to propagation with guessing.
+* **High variance.** Two runs of the same instance with different seeds can land far apart —
+  on the harder benchmark rows, `SOLVED` and `EXHAUSTED` are both ordinary outcomes. Fix
+  `--seed` when you need a run to be reproducible.
+* **Not competitive with CDCL in general.** It trades completeness for a different kind of
+  inference, and only pays off where that inference exists: circuits with a small set of free
+  inputs and a pinned output.
 
 ## Star history
 
