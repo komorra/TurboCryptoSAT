@@ -1,0 +1,17 @@
+# Build output
+build/
+out/
+cmake-build-*/
+*.o
+*.obj
+*.exe
+*.pdb
+*.ilk
+
+# Solver output
+*.solution.cnf
+
+# Editors
+.vs/
+.vscode/
+.idea/

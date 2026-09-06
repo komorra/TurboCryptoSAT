@@ -1,0 +1,75 @@
+name: build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  name: linux-gcc,    cc: gcc,   cxx: g++ }
+          - { os: ubuntu-latest,  name: linux-clang,  cc: clang, cxx: clang++ }
+          - { os: windows-latest, name: windows-msvc, cc: "",    cxx: "" }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+
+      - name: Build
+        run: cmake --build build --config Release -j 4
+
+      # Multi-config generators put the binary under a per-config directory.
+      - name: Locate the binary
+        shell: bash
+        run: |
+          if [ -x build/Release/turbocryptosat.exe ]; then
+            echo "TCS_BIN=build/Release/turbocryptosat.exe" >> "$GITHUB_ENV"
+          else
+            echo "TCS_BIN=build/turbocryptosat" >> "$GITHUB_ENV"
+          fi
+
+      - name: Version
+        shell: bash
+        run: "$TCS_BIN" --version
+
+      # The suite is generated from fixed seeds, so a differing file count here
+      # would mean the generator stopped being deterministic.
+      - name: Regenerate the benchmark suite
+        shell: bash
+        run: |
+          "$TCS_BIN" gen-benchmark "${RUNNER_TEMP}/bench"
+          generated=$(ls "${RUNNER_TEMP}/bench" | wc -l)
+          shipped=$(ls benchmark/*.cnf | wc -l)
+          echo "generated $generated, shipped $shipped"
+          test "$generated" -eq "$shipped"
+
+      # Circuit instances are the ones the solver is built for and it clears
+      # these reliably, so they are the ones CI is allowed to fail on.
+      - name: Solve and verify
+        shell: bash
+        run: |
+          for f in benchmark/09-circuit-i24-g300.cnf \
+                   benchmark/10-circuit-i32-g600.cnf \
+                   benchmark/11-circuit-i48-g1200.cnf \
+                   benchmark/21-sha256-r08-c03.cnf; do
+            "$TCS_BIN" "$f" --no-ui --quiet --timeout 300
+          done
+          ls benchmark/*.solution.cnf
+
+      # The rest of the suite is reported but not asserted on: the solver is
+      # statistical and the harder families are expected to time out.
+      - name: Short benchmark
+        shell: bash
+        run: "$TCS_BIN" benchmark benchmark --no-ui --siglen 256 --timeout 20 || true
