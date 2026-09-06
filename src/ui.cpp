@@ -253,6 +253,11 @@ void Ui::buildStatus(const UiModel& m, int width) {
     if (m.gateSampling) {
         std::snprintf(buf, sizeof(buf), fmt("%llu (samples executed)", "%llu exec"),
                       static_cast<unsigned long long>(m.gates));
+    } else if (m.gates > 0) {
+        // Recovered but unusable: some clauses fall outside the patterns.
+        std::snprintf(buf, sizeof(buf), fmt("%llu, %llu clauses short", "%llu inc"),
+                      static_cast<unsigned long long>(m.gates),
+                      static_cast<unsigned long long>(m.unexplained));
     } else {
         std::snprintf(buf, sizeof(buf), fmt("none (samples propagated)", "none"));
     }

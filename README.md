@@ -87,17 +87,23 @@ lane settles — on 17-round SHA-256 (24 765 variables, 82 564 clauses) about **
 population, which is enough to make redrawing one a decision rather than a reflex.
 
 A Tseitin-encoded circuit does not have to be propagated, though. It can be *run*. So before
-solving, the clauses are matched against the two definition shapes an AND/OR/XOR encoder emits:
+solving, the clauses are matched against the three definition shapes an AND/OR/XOR/NOT encoder
+emits:
 
 ```
 o == x & y     (~o | x), (~o | y), (o | ~x | ~y)
+o == ~x        (~o | ~x), (o | x)          -- and o == x, the same shape
 o == x ^ y     the four ternary clauses over {o,x,y} that forbid one parity
 ```
 
-Both polarities of the output are tried, so OR, NAND, NOR and XNOR are these same two patterns
-with literals negated. What is found is then ordered: a variable no definition claims becomes a
-free input, and a definition is accepted once all of its inputs are known, which yields a
-topological order — and breaks a cycle by freeing a variable rather than closing it.
+Both polarities of the output are tried, so OR, NAND, NOR and XNOR are these same patterns with
+literals negated. The middle one exists because encoders differ on NOT: some fold it into the
+literal and never give it a variable (this repository's generator does), others emit it as a
+gate of its own — and an unmatched inverter does not just cost its own two clauses, it hides
+every gate that is only reachable through it. What is found is then ordered: a variable no
+definition claims becomes a free input, and a definition is accepted once all of its inputs are
+known, which yields a topological order — and breaks a cycle by freeing a variable rather than
+closing it.
 
 Generating a population is then a single forward pass: random words into the free variables,
 one `&` or `^` per gate per 64-lane word, nothing revisited. No conflicts, no retry rounds, and
@@ -121,12 +127,17 @@ honouring that means constraining the samples rather than merely running the cir
 anything without recognisable gate structure — random 3-SAT — where the clauses left over
 disqualify the network immediately.
 
-The summary line reports which of the two ran:
+The summary line reports which of the two ran, and when the network was rejected, by how much:
 
 ```
   circuit      24741 gates recovered, samples executed
-  circuit      not recovered, samples built by propagation
+  circuit      115247 gates recovered but 18749 clauses unexplained, samples built by propagation
+  circuit      no gate structure found, samples built by propagation
 ```
+
+The middle line is the one to read closely. A handful of unexplained clauses on a formula that
+is a circuit means one pattern this matcher does not know, and the whole fast path is lost to
+it.
 
 ## Building
 
@@ -384,7 +395,7 @@ The summary after every run is meant to be read as a diagnosis.
 | Restarts early and often | Statistical verdicts are firing on biased variables | Raise `--siglen`, or start from a lower `--initk` |
 | Progress stalls, few guesses | Nothing left for the probes to find | Raise `--probe-vars` to 2, or lower `--stall-limit` |
 | Out of memory | The table is `numVars * sigLen * 8` bytes, twice that while a propagated population is being built | Lower `--siglen` |
-| `circuit` says `not recovered` on an instance that is one | Some clauses fall outside the two gate patterns, so the population is propagated instead of executed | Nothing to turn; sampling is slower but the result is the same |
+| `circuit` reports unexplained clauses on an instance that is a circuit | Some clauses fall outside the three gate patterns, so the population is propagated instead of executed | Nothing to turn; sampling is slower but the result is the same |
 
 ## Limitations
 

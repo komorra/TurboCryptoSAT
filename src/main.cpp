@@ -396,6 +396,7 @@ RunOutcome runInstance(const Options& opt, const std::string& path, bool interac
         model.sigBytes = st.signatureBytes;
         model.inputVarCount = static_cast<int>(solver.inputVars().size());
         model.gates = st.gates;
+        model.unexplained = st.unexplained;
         model.gateSampling = st.gateSampling;
         model.res = lastRes;
 
@@ -457,8 +458,13 @@ void printSummary(const RunOutcome& r, const std::string& path) {
     if (s.gateSampling) {
         std::printf("  circuit      %llu gates recovered, samples executed\n",
                     static_cast<unsigned long long>(s.gates));
+    } else if (s.gates > 0) {
+        std::printf("  circuit      %llu gates recovered but %llu clauses unexplained, "
+                    "samples built by propagation\n",
+                    static_cast<unsigned long long>(s.gates),
+                    static_cast<unsigned long long>(s.unexplained));
     } else {
-        std::printf("  circuit      not recovered, samples built by propagation\n");
+        std::printf("  circuit      no gate structure found, samples built by propagation\n");
     }
     std::printf("  samples      %llu / %llu lanes in %.2fs\n",
                 static_cast<unsigned long long>(s.validSamples),

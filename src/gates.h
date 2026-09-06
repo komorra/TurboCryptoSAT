@@ -6,13 +6,19 @@
 // propagation sweeps over the whole formula into one word-parallel pass over
 // the gate list, in topological order, with no conflicts and no retries.
 //
-// Two patterns are matched, which together cover everything an AND/OR/XOR
+// Three patterns are matched, which together cover what an AND/OR/XOR/NOT
 // Tseitin encoder emits (OR is an AND of negated literals, and both polarities
-// of the output are tried, so NOR/NAND/XNOR fall out of the same two):
+// of the output are tried, so NOR/NAND/XNOR fall out of the same three):
 //
 //   o == x & y   ->  (~o | x), (~o | y), (o | ~x | ~y)
+//   o == ~x      ->  (~o | ~x), (o | x)      - and o == x, the same shape
 //   o == x ^ y   ->  the four ternary clauses over {o,x,y} that forbid every
 //                    assignment of one parity
+//
+// The second one matters more than its size suggests. An encoder that folds
+// negation into the literal never emits it, but one that gives NOT a variable
+// of its own puts inverters in the middle of the circuit, and every gate
+// reachable only through one of them is lost with it.
 //
 // Anything not matched simply stays a residual clause; the caller decides
 // whether the recovered network explains enough of the formula to be used.

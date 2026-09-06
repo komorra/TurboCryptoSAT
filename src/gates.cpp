@@ -99,6 +99,59 @@ void findAndGates(const Cnf& cnf, std::vector<Candidate>& out) {
     }
 }
 
+// o == x and o == ~x, two binary clauses over the same pair of variables with
+// opposite sign patterns: (~o | x), (o | ~x).
+//
+// An encoder that gives NOT a variable of its own emits exactly this. Ours does
+// not - it folds negation into the literal - so the pattern is easy to overlook,
+// and missing it leaves the whole network incomplete: an inverter sits in the
+// middle of the circuit, so its clauses are not the only ones that go
+// unexplained, every gate reachable only through it does too.
+void findEqGates(const Cnf& cnf, std::vector<Candidate>& out) {
+    const size_t nc = cnf.clauseCount();
+    // The loader stores each clause ordered by variable, so a binary clause and
+    // its complement pack into keys that can be matched directly.
+    std::vector<std::pair<uint64_t, uint32_t>> bin;
+    auto key = [](Lit a, Lit b) {
+        return (static_cast<uint64_t>(static_cast<uint32_t>(a)) << 32) |
+               static_cast<uint32_t>(b);
+    };
+    for (size_t c = 0; c < nc; ++c) {
+        if (cnf.clauseLen(c) != 2) continue;
+        const Lit* b = cnf.clauseBegin(c);
+        bin.push_back({key(b[0], b[1]), static_cast<uint32_t>(c)});
+    }
+    std::sort(bin.begin(), bin.end());
+
+    for (const auto& e : bin) {
+        const Lit* b = cnf.clauseBegin(e.second);
+        const uint64_t want = key(litNeg(b[0]), litNeg(b[1]));
+        const auto it = std::lower_bound(bin.begin(), bin.end(),
+                                         std::make_pair(want, uint32_t(0)));
+        if (it == bin.end() || it->first != want) continue;
+        if (it->second <= e.second) continue;  // the pair is handled once
+
+        // (l0 | l1) and (~l0 | ~l1) together say l0 == ~l1. Written as a gate:
+        // one input, taken twice, which the ordering pass counts once.
+        const Lit l0 = b[0];
+        const Lit l1 = b[1];
+        Candidate cd;
+        cd.op = Gate::And;
+        cd.clauseCount = 2;
+        cd.clauses[0] = e.second;
+        cd.clauses[1] = it->second;
+        for (int k = 0; k < 2; ++k) {
+            const Lit self = k == 0 ? l0 : l1;
+            const Lit other = k == 0 ? l1 : l0;
+            cd.out = litVar(self);
+            cd.negOut = litSign(self);
+            cd.in0 = litNeg(other);
+            cd.in1 = litNeg(other);
+            out.push_back(cd);
+        }
+    }
+}
+
 // A clause forbids exactly the assignment that makes each of its literals
 // false, so a clause over three variables rules out the assignment given by its
 // sign pattern. Four clauses ruling out all four patterns of one parity say
@@ -195,6 +248,7 @@ void extractGates(const Cnf& cnf, GateNetwork& net) {
 
     std::vector<Candidate> cands;
     findAndGates(cnf, cands);
+    findEqGates(cnf, cands);
     findXorGates(cnf, cands);
     if (cands.empty()) {
         net.residualClauses = net.clauseCount;

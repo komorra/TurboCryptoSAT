@@ -216,7 +216,10 @@ bool Solver::buildSignatures(std::string& error) {
     stats_.totalSamples = sig_.sampleCount();
     stats_.signatureBytes = sig_.memoryBytes();
     stats_.gateSampling = sig_.gateSampling();
-    stats_.gates = sig_.gateSampling() ? gateNet_.gates.size() : 0;
+    // Reported even when the fast path was not taken: a network that explains
+    // almost everything means one unmatched pattern, which is worth seeing.
+    stats_.gates = gateNet_.gates.size();
+    stats_.unexplained = gateNet_.residualClauses;
     return true;
 }
 
