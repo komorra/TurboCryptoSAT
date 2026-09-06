@@ -79,6 +79,42 @@ void keyWatcherLoop() {
     }
 }
 
+// Total CPU time this process has burned so far, kernel plus user.
+uint64_t processCpuNs() {
+#if defined(_WIN32)
+    FILETIME creation, exitT, kernel, user;
+    if (!GetProcessTimes(GetCurrentProcess(), &creation, &exitT, &kernel, &user)) return 0;
+    ULARGE_INTEGER k, u;
+    k.LowPart = kernel.dwLowDateTime;
+    k.HighPart = kernel.dwHighDateTime;
+    u.LowPart = user.dwLowDateTime;
+    u.HighPart = user.dwHighDateTime;
+    return (k.QuadPart + u.QuadPart) * 100ull;  // FILETIME ticks are 100ns
+#else
+    FILE* f = std::fopen("/proc/self/stat", "r");
+    if (!f) return 0;
+    // utime/stime are fields 14 and 15, counted after the parenthesised comm.
+    char buf[4096];
+    size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
+    std::fclose(f);
+    buf[n] = 0;
+    char* p = std::strrchr(buf, ')');
+    if (!p || !p[1]) return 0;
+    int field = 2;
+    unsigned long utime = 0, stime = 0;
+    char* save = nullptr;
+    char* tok = strtok_r(p + 2, " ", &save);
+    while (tok) {
+        ++field;
+        if (field == 14) utime = std::strtoul(tok, nullptr, 10);
+        if (field == 15) { stime = std::strtoul(tok, nullptr, 10); break; }
+        tok = strtok_r(nullptr, " ", &save);
+    }
+    const long hz = ::sysconf(_SC_CLK_TCK) > 0 ? ::sysconf(_SC_CLK_TCK) : 100;
+    return static_cast<uint64_t>(utime + stime) * (1000000000ull / static_cast<uint64_t>(hz));
+#endif
+}
+
 }  // namespace
 
 uint64_t nowNs() {
@@ -89,6 +125,18 @@ uint64_t nowNs() {
 
 TermSize terminalSize() {
     TermSize ts;
+    // TCS_TERM_SIZE=<cols>x<rows> pins the geometry, which is how the dashboard
+    // layout gets checked at sizes the test machine's console cannot take.
+    if (const char* forced = std::getenv("TCS_TERM_SIZE")) {
+        int c = 0, r = 0;
+        if (std::sscanf(forced, "%dx%d", &c, &r) == 2 && c > 0 && r > 0) {
+            ts.cols = c;
+            ts.rows = r;
+            if (ts.cols < 20) ts.cols = 20;
+            if (ts.rows < 8) ts.rows = 8;
+            return ts;
+        }
+    }
 #if defined(_WIN32)
     CONSOLE_SCREEN_BUFFER_INFO info;
     HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -116,13 +164,16 @@ bool stdoutIsTty() {
 #endif
 }
 
-void enableAnsi() {
+bool enableAnsi() {
 #if defined(_WIN32)
     HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
-    if (h == INVALID_HANDLE_VALUE) return;
+    if (h == INVALID_HANDLE_VALUE) return false;
     DWORD mode = 0;
-    if (!GetConsoleMode(h, &mode)) return;
-    SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    if (!GetConsoleMode(h, &mode)) return false;  // redirected, or not a console
+    if (mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING) return true;
+    return SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0;
+#else
+    return true;
 #endif
 }
 
@@ -130,22 +181,15 @@ ResourceMonitor::ResourceMonitor() {
     cores_ = std::thread::hardware_concurrency();
     if (cores_ == 0) cores_ = 1;
     prevWallNs_ = nowNs();
-    prevCpuNs_ = 0;
+    // Seeding from the real counter keeps the first sample from charging
+    // the whole of process start-up to one short interval.
+    prevCpuNs_ = processCpuNs();
 }
 
 ResourceSnapshot ResourceMonitor::sample() {
     ResourceSnapshot s;
-    uint64_t cpuNs = 0;
+    const uint64_t cpuNs = processCpuNs();
 #if defined(_WIN32)
-    FILETIME creation, exitT, kernel, user;
-    if (GetProcessTimes(GetCurrentProcess(), &creation, &exitT, &kernel, &user)) {
-        ULARGE_INTEGER k, u;
-        k.LowPart = kernel.dwLowDateTime;
-        k.HighPart = kernel.dwHighDateTime;
-        u.LowPart = user.dwLowDateTime;
-        u.HighPart = user.dwHighDateTime;
-        cpuNs = (k.QuadPart + u.QuadPart) * 100ull;  // FILETIME ticks are 100ns
-    }
     PROCESS_MEMORY_COUNTERS pmc;
     if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) {
         s.rssBytes = pmc.WorkingSetSize;
@@ -156,28 +200,6 @@ ResourceSnapshot ResourceMonitor::sample() {
         s.totalRamBytes = ms.ullTotalPhys;
     }
 #else
-    if (FILE* f = std::fopen("/proc/self/stat", "r")) {
-        // utime/stime are fields 14 and 15, counted after the parenthesised comm.
-        char buf[4096];
-        size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
-        std::fclose(f);
-        buf[n] = 0;
-        char* p = std::strrchr(buf, ')');
-        if (p && p[1]) {
-            int field = 2;
-            unsigned long utime = 0, stime = 0;
-            char* save = nullptr;
-            char* tok = strtok_r(p + 2, " ", &save);
-            while (tok) {
-                ++field;
-                if (field == 14) utime = std::strtoul(tok, nullptr, 10);
-                if (field == 15) { stime = std::strtoul(tok, nullptr, 10); break; }
-                tok = strtok_r(nullptr, " ", &save);
-            }
-            const long hz = ::sysconf(_SC_CLK_TCK) > 0 ? ::sysconf(_SC_CLK_TCK) : 100;
-            cpuNs = static_cast<uint64_t>(utime + stime) * (1000000000ull / static_cast<uint64_t>(hz));
-        }
-    }
     if (FILE* f = std::fopen("/proc/self/statm", "r")) {
         unsigned long total = 0, resident = 0;
         if (std::fscanf(f, "%lu %lu", &total, &resident) == 2) {
@@ -195,6 +217,8 @@ ResourceSnapshot ResourceMonitor::sample() {
     if (wall > prevWallNs_ && cpuNs >= prevCpuNs_) {
         const double dt = static_cast<double>(wall - prevWallNs_);
         s.cpuPercent = 100.0 * static_cast<double>(cpuNs - prevCpuNs_) / dt;
+        const double ceiling = 100.0 * static_cast<double>(cores_);
+        if (s.cpuPercent > ceiling) s.cpuPercent = ceiling;
     }
     prevWallNs_ = wall;
     prevCpuNs_ = cpuNs;

@@ -1,5 +1,13 @@
 // Colored ASCII dashboard: a stable map of clause satisfaction on the left and
 // a live status panel on the right, both sized to the current terminal.
+//
+// Rendering rules that keep legacy consoles (cmd.exe / conhost) happy:
+//   * the dashboard lives in the alternate screen buffer, so it never touches
+//     the shell's scrollback and the wheel cannot scroll it out of place;
+//   * every row is padded to exactly the terminal width and placed with an
+//     absolute cursor move, so nothing ever wraps and nothing ever scrolls;
+//   * only rows whose bytes changed since the previous frame are rewritten,
+//     which is what removes the flicker.
 #pragma once
 
 #include <cstdint>
@@ -62,16 +70,41 @@ public:
     bool enabled() const { return enabled_; }
 
 private:
-    void drawMap(const UiModel& m, int width, int height);
-    void statusLines(const UiModel& m, int width, std::vector<std::string>& out);
+    // One rendered row: the escape-laden bytes plus the number of columns they
+    // actually occupy. Escapes are appended without touching the column count,
+    // which is what lets a row be padded to an exact width.
+    struct Line {
+        std::string text;
+        int visible = 0;
+
+        void esc(const char* e) { text += e; }
+        void esc(const std::string& e) { text += e; }
+        void put(char c) { text += c; ++visible; }
+        void put(const char* s, int budget);
+        void put(const std::string& s, int budget) { put(s.c_str(), budget); }
+        void pad(int width) {
+            if (visible < width) {
+                text.append(static_cast<size_t>(width - visible), ' ');
+                visible = width;
+            }
+        }
+    };
+
+    void buildMap(const UiModel& m, int width, int height);
+    void buildStatus(const UiModel& m, int width);
+    void buildFrame(const UiModel& m, int cols, int rows, int mapW);
 
     bool enabled_ = true;
     bool started_ = false;
+    bool tty_ = false;
     int lastCols_ = -1;
     int lastRows_ = -1;
-    std::vector<uint32_t> order_;   // display rank -> clause index
-    std::vector<std::string> map_;  // rendered map rows
-    std::string frame_;
+    std::vector<uint32_t> order_;    // display rank -> clause index
+    std::vector<Line> map_;          // left pane rows
+    std::vector<Line> status_;       // right pane rows
+    std::vector<Line> lines_;        // the whole frame, one entry per row
+    std::vector<std::string> prev_;  // bytes drawn last frame, for the diff
+    std::string out_;                // one write per frame
 };
 
 }  // namespace tcs

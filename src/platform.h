@@ -18,8 +18,9 @@ TermSize terminalSize();
 // True when stdout is attached to an interactive console.
 bool stdoutIsTty();
 
-// Enables ANSI/VT escape sequence processing (no-op outside Windows).
-void enableAnsi();
+// Enables ANSI/VT escape sequence processing. Returns false when the attached
+// console cannot process escape sequences (no-op and always true off Windows).
+bool enableAnsi();
 
 struct ResourceSnapshot {
     double cpuPercent = 0.0;   // summed over all cores, 100% == one saturated core

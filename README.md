@@ -178,30 +178,38 @@ a map of every clause in the formula, in a fixed order (by clause length, then b
 variable) so a cell always stands for the same clauses; cells go from dark to green as their
 clauses become satisfied. The right pane is the run status.
 
+The layout is recomputed on every frame, so resizing the window is picked up within about a
+tenth of a second, and the status values switch to compact forms when the pane gets narrow. It is
+drawn in the terminal's alternate screen buffer, the way `vim` and `htop` are: the shell's
+scrollback is left untouched, the dashboard cannot be scrolled out of place, and only the rows
+whose content actually changed are rewritten, which is what keeps it from flickering on
+`cmd.exe`. If the console cannot process escape sequences the dashboard turns itself off and
+the plain progress log is used instead.
+
 ```
  TurboCryptoSAT  |  solving  |  signature propagation
-###:............................................ | STATUS
-................................................ |
-......................................:......... | attempt      1 / 5
-......-#..........................+:....:....... | variables    7588 / 24765  (30.6%)
-.............+:...:-....................+-----+: | [========                   ]
-::.....:...*:.+-...*#--+++---:....::.:++-*+:::+* | clauses sat  26473 / 82564  (32.1%)
-+++*+++++....:----####:::-#####*++++-::..#---### | [=========                  ]
-###########*#**-:+.:#---###############*#-*+--#+ |
--+###############:+::*::+#--*################:.. | elapsed      00:00:11
-................................................ | eta          00:51:43
-................................................ | rate         5.5 vars/s
-................................................ |
-................................................ | probes       263520 (ok 91, rej 0)
-......................:...............:++-...... | guesses      3    restarts 0
-..............................-++............... | resamples    1
-.....................:++::.:::.:-............... |
-.............*****++++--:.:..:.....--...-:.-++.. | samples      65536 / 65536 lanes
-.:..+###*+++*+---::::......+:.::*--*+::-::::###* | tuning       sigLen 1024  initk 8  mink 32
-***+#*+------:....++++++##*++::::::*##########+- | input vars   24
-----+..:.:#++++######################++++--*:.+. |
-:#*+++#####################+**++++:---+#++++#### | threads      32
-################*++**++:..-:.+#*++*############# | cpu          1441 %
+##*...:................................... | STATUS
+.......................................... |
+.......................................... | attempt      1 / 5
+.....:#......................:+....:...... | variables    7593/24765 31%
+...........--...-:.................+----+: | [==========                      ]
+::....:..:-.++..:#+--++---....:..-+-*-::-* | clauses sat  26480/82564 32%
+++++++++....+--+###-::-####*+++*.:..*--+## | [==========                      ]
+##########***---.++--#############*#-*+:#+ |
+-*#############.+:+-:+*--##############+.. | elapsed      00:00:13
+.......................................... | eta          00:42:00
+.......................................... | rate         6.8 v/s
+.......................................... |
+.......................................... | probes       250496 ok87 rj0
+...................:..............++:..... | guesses      4  rst 0
+..........................-++............. | resamples    1
+..................:++:.::::::............. |
+...........+****+++--:.........+...-..*+:. | samples      65536/65536
+...-###*++++---::::....:-:.:*:++-:--.:+##* | tuning       1024/8/32
+*++**+-----:....*++++##++::::.:#########*- | input vars   24
+---+-.:.-#+++###################*-++-+-.+. |
+:#+++*#################*+#++++:+--#+++#### | threads      32
+##############*++*++:..+.:#*++*########### | cpu          964 %
  clause map: sorted by length then first variable; # satisfied  . open
  press Ctrl+C or ESC ESC to abort
 ```
