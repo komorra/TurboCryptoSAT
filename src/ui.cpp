@@ -235,10 +235,13 @@ void Ui::buildStatus(const UiModel& m, int width) {
                   static_cast<unsigned long long>(m.rejected));
     field("probes", buf);
     std::snprintf(buf, sizeof(buf), fmt("%llu    restarts %u", "%llu  rst %u"),
-                  static_cast<unsigned long long>(m.guesses), m.restarts);
-    field("guesses", buf);
-    std::snprintf(buf, sizeof(buf), "%llu", static_cast<unsigned long long>(m.resamples));
+                  static_cast<unsigned long long>(m.resamples), m.restarts);
     field("resamples", buf);
+    std::snprintf(buf, sizeof(buf), fmt("%llu (%llu confl, %llu implied)", "%llu c%llu i%llu"),
+                  static_cast<unsigned long long>(m.cdclPhases),
+                  static_cast<unsigned long long>(m.cdclConflicts),
+                  static_cast<unsigned long long>(m.cdclImplied));
+    field("cdcl", buf);
     blank();
 
     std::snprintf(buf, sizeof(buf), fmt("%llu / %llu lanes", "%llu/%llu"),

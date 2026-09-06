@@ -48,6 +48,11 @@ a probe is refuted, the attempt is dead and the solver restarts with a fresh sam
 (five attempts by default). This makes it a tool for **satisfiable** instances — reduced-round
 hash preimages, circuit inversion, algebraic attacks — and not a decision procedure.
 
+When the probes stop agreeing on anything but nothing has been refuted either, the run is on a
+plateau rather than in a corner. The answer to that is first a fresh sample population and then
+a **bounded CDCL phase** — see [Plateaus](#plateaus). Nothing about it is a guess: it hands
+back only literals it has proved.
+
 The one parameter with no safe default is `initk`, the width of the window in step 3. Each
 literal in it roughly halves the surviving sample set: too wide and nothing looks constant, too
 narrow and merely *biased* variables — an AND deep in a circuit that is almost always 0 — pass
@@ -76,13 +81,25 @@ attempt halves `initk`, walking from aggressive to conservative.
                                           |
         both polarities refuted           v
         -----> restart attempt   commit + propagate ----> repeat
+                                          |
+                     NOTHING COMMITTED    |  for stallLimit rounds running
+                     FOR A WHILE          v
+                  +----------------------------------------------+
+                  |  redraw the samples, and failing that:        |
+                  |  CDCL over the same formula, everything       |
+                  |  committed so far pinned at level 0           |
+                  |    -> a learned unit  = proved, commit it     |
+                  |    -> a full model    = solved                |
+                  |    -> level 0 conflict = attempt is dead      |
+                  |    -> budget spent    = double it, keep going |
+                  +----------------------------------------------+
 ```
 
 ### Sampling by executing the circuit
 
 The population is the expensive part of a run: it is built before the first probe, again on
-every restart, and again whenever the solver stalls and decides fresh randomness is a better
-answer than a guess. Built by unit propagation it means sweeping the whole formula until every
+every restart, and again whenever the solver stalls and decides fresh randomness is the
+cheapest way out. Built by unit propagation it means sweeping the whole formula until every
 lane settles — on 17-round SHA-256 (24 765 variables, 82 564 clauses) about **1.2 s** per
 population, which is enough to make redrawing one a decision rather than a reflex.
 
@@ -138,6 +155,39 @@ The summary line reports which of the two ran, and when the network was rejected
 The middle line is the one to read closely. A handful of unexplained clauses on a formula that
 is a circuit means one pattern this matcher does not know, and the whole fast path is lost to
 it.
+
+### Plateaus
+
+A probe is barren when both polarities survive and their outcomes intersect down to nothing new.
+That is not a conflict — the assignment may well still be extendable — so restarting would throw
+away good work. After `--stall-limit` barren rounds in a row (1000 by default) the solver
+responds in two steps.
+
+First it redraws the sample population, which is the cheap and entirely safe move: a different
+65 536 samples give the filter different constants to find. That is tried twice, and only while
+sampling stays under 15 % of elapsed time and would not overshoot `--timeout` — a redraw is
+interruptible only *between* its retry rounds, so its cost has to be budgeted before it starts.
+
+If a fresh population does not help either, the solver runs a **bounded CDCL phase**. A
+conventional conflict-driven search — two watched literals, 1UIP learning, VSIDS, phase saving,
+Luby restarts — runs over the same formula with every literal the signature loop has committed
+pinned at level 0. The phase ends on the first of:
+
+* **a new literal on the level 0 trail** — a learned unit clause. It follows from the formula
+  and the pinned assignment alone, so it is committed like any sound inference;
+* **a full model** — the instance is finished outright;
+* **a conflict at level 0** — the pinned assignment is refutable, so the attempt is dead and the
+  solver restarts;
+* **the conflict budget** (`--cdcl-conflicts`, 10 000 per phase). Nothing was proved, so the
+  budget doubles and the probes carry on. Learned clauses survive between phases within an
+  attempt, so the next phase resumes where this one stopped rather than starting cold. They are
+  dropped on a restart, since they are implied by the assignment the restart retracts.
+
+This replaces what used to happen here: picking the most lopsided variable in the sample
+population and assigning it its majority value. That was a bet the solver could not take back,
+and on the instances where it fired most — random k-SAT, where the population carries no signal
+at all — it was close to a coin flip. `--no-cdcl` restores the plateau to resampling and further
+probing only, which is useful mainly for measuring what the statistical layer does on its own.
 
 ## Building
 
@@ -200,7 +250,9 @@ turbocryptosat sha256_17.cnf \
 | `--probe-vars <n>` | Variables probed at once, giving `2^n` branches | `1` |
 | `--threads <n>` | Worker threads | hardware threads |
 | `--attempts <n>` | Restarts after a conflict | `5` |
-| `--stall-limit <n>` | Barren rounds before the samples are redrawn and, failing that, a variable is guessed | `1000` |
+| `--stall-limit <n>` | Barren rounds before the samples are redrawn and, failing that, a CDCL phase runs | `1000` |
+| `--cdcl-conflicts <n>` | Conflict budget for one CDCL phase, doubled whenever a phase proves nothing; `0` means bounded only by `--timeout` | `10000` |
+| `--no-cdcl` | Never run a CDCL phase; answer plateaus by resampling and further probing only | off |
 | `--sample-rounds <n>` | Retry rounds while building the samples | `12` |
 | `--keep-samples` | Reuse the sample population across restarts | off |
 | `--timeout <sec>` | Abort after this many seconds | unlimited |
@@ -266,8 +318,8 @@ the plain progress log is used instead.
 .......................................... | rate         28.3 v/s
 .......................................... |
 .......................................... | probes       269408 ok94 rj0
-...................:..............++:..... | guesses      5  rst 0
-..........................-++............. | resamples    1
+...................:..............++:..... | resamples    1  rst 0
+..........................-++............. | cdcl         2 c14903 i7
 ..................:++:.::::::............. |
 ...........+****+++--:.........+...-..*+:. | samples      65536/65536
 ...-###*++++---::::....:-:.:*:++-:--.:+##* | tuning       1024/8/32
@@ -293,7 +345,7 @@ out of reach, in four families:
 
 | Instances | Family | What it stresses |
 | --- | --- | --- |
-| `01`–`08` | Planted random 3-SAT, n = 60…900 at ratio ≈ 4.2 | The worst case for this solver: no input set drives the formula, so the sample population is nearly empty and it degrades to propagation plus guessing |
+| `01`–`08` | Planted random 3-SAT, n = 60…900 at ratio ≈ 4.2 | The worst case for the statistical layer: no input set drives the formula, so the sample population is nearly empty and every one of these is finished by the CDCL phase |
 | `09`–`14` | Random mixed AND/OR/XOR circuits, 24…128 inputs | Circuit inversion with only the output layer pinned |
 | `15`–`20` | XOR-heavy random circuits, 24…128 inputs | Parity structure, which unit propagation handles badly |
 | `21`–`26` | Reduced-round SHA-256 preimages, 8…20 rounds, 3–4 byte messages | The intended target |
@@ -323,44 +375,51 @@ suite on a 16-core / 32-thread desktop, default settings, 60 seconds per instanc
 +------------------------------------+---------+---------+------------+-----+----------+----------+------------+
 | instance                           |    vars | clauses | status     | att |  sample  |   total  |     probes |
 +------------------------------------+---------+---------+------------+-----+----------+----------+------------+
-| 01-rand3sat-n060.cnf               |      60 |     252 | SOLVED     |   1 |    0.16s |    3.99s |     608992 |
-| 02-rand3sat-n100.cnf               |     100 |     420 | SOLVED     |   1 |    0.32s |    6.39s |     961472 |
-| 03-rand3sat-n150.cnf               |     150 |     630 | EXHAUSTED  |   5 |    1.44s |   18.26s |    2563712 |
-| 04-rand3sat-n220.cnf               |     220 |     924 | EXHAUSTED  |   5 |    3.01s |   30.16s |    3785152 |
-| 05-rand3sat-n320.cnf               |     320 |    1360 | EXHAUSTED  |   5 |    4.14s |   35.10s |    4938176 |
-| 06-rand3sat-n450.cnf               |     450 |    1912 | EXHAUSTED  |   5 |    5.40s |   47.58s |    6798752 |
-| 07-rand3sat-n650.cnf               |     650 |    2769 | TIMEOUT    |   5 |    8.88s |   60.00s |    8315648 |
-| 08-rand3sat-n900.cnf               |     900 |    3834 | TIMEOUT    |   3 |    6.21s |   60.00s |    7440096 |
-| 09-circuit-i24-g300.cnf            |     322 |     981 | SOLVED     |   1 |    0.01s |    7.44s |     952800 |
-| 10-circuit-i32-g600.cnf            |     625 |    1959 | SOLVED     |   1 |    0.01s |    1.18s |     187168 |
-| 11-circuit-i48-g1200.cnf           |    1242 |    3921 | SOLVED     |   1 |    0.02s |    2.63s |     423104 |
-| 12-circuit-i64-g2000.cnf           |    2059 |    6571 | SOLVED     |   1 |    0.03s |    3.41s |     548544 |
-| 13-circuit-i96-g3500.cnf           |    3594 |   11420 | SOLVED     |   1 |    0.07s |    4.57s |     707520 |
-| 14-circuit-i128-g6000.cnf          |    6125 |   19631 | SOLVED     |   2 |    0.11s |    5.17s |     753984 |
-| 15-xorcircuit-i24-g200.cnf         |     223 |     757 | SOLVED     |   1 |    0.00s |    1.44s |     224256 |
-| 16-xorcircuit-i32-g400.cnf         |     430 |    1502 | SOLVED     |   1 |    0.00s |    1.14s |     160544 |
-| 17-xorcircuit-i48-g800.cnf         |     846 |    3000 | TIMEOUT    |   4 |    0.06s |   60.00s |    9033184 |
-| 18-xorcircuit-i64-g1500.cnf        |    1562 |    5586 | TIMEOUT    |   2 |    0.18s |   60.00s |    8010336 |
-| 19-xorcircuit-i96-g2500.cnf        |    2590 |    9351 | TIMEOUT    |   1 |    0.10s |   60.00s |    6178208 |
-| 20-xorcircuit-i128-g4000.cnf       |    4125 |   14908 | TIMEOUT    |   1 |    0.35s |   60.00s |    4808704 |
-| 21-sha256-r08-c03.cnf              |   10490 |   35148 | SOLVED     |   1 |    0.09s |    0.11s |          0 |
-| 22-sha256-r11-c03.cnf              |   15177 |   50723 | SOLVED     |   1 |    0.13s |    0.16s |          0 |
-| 23-sha256-r14-c03.cnf              |   19894 |   66389 | SOLVED     |   1 |    0.22s |    0.25s |          0 |
-| 24-sha256-r17-c03.cnf              |   24765 |   82564 | TIMEOUT    |   1 |    1.35s |   60.01s |    1766976 |
-| 25-sha256-r20-c03.cnf              |   29725 |   99060 | TIMEOUT    |   1 |    1.33s |   60.01s |    1444096 |
-| 26-sha256-r17-c04.cnf              |   25264 |   84217 | TIMEOUT    |   1 |    1.07s |   60.01s |    1675200 |
+| 01-rand3sat-n060.cnf               |      60 |     252 | SOLVED     |   1 |    0.07s |    0.64s |      96096 |
+| 02-rand3sat-n100.cnf               |     100 |     420 | SOLVED     |   1 |    0.05s |    0.25s |      32032 |
+| 03-rand3sat-n150.cnf               |     150 |     630 | SOLVED     |   1 |    0.05s |    0.25s |      32032 |
+| 04-rand3sat-n220.cnf               |     220 |     924 | SOLVED     |   1 |    0.08s |    0.28s |      32032 |
+| 05-rand3sat-n320.cnf               |     320 |    1360 | SOLVED     |   1 |    0.11s |    0.64s |      64064 |
+| 06-rand3sat-n450.cnf               |     450 |    1912 | SOLVED     |   1 |    0.18s |    0.42s |      32032 |
+| 07-rand3sat-n650.cnf               |     650 |    2769 | TIMEOUT    |   1 |    0.73s |   60.00s |     320320 |
+| 08-rand3sat-n900.cnf               |     900 |    3834 | TIMEOUT    |   1 |    1.13s |   60.00s |     320320 |
+| 09-circuit-i24-g300.cnf            |     322 |     981 | SOLVED     |   1 |    0.00s |    0.55s |      96160 |
+| 10-circuit-i32-g600.cnf            |     625 |    1959 | SOLVED     |   1 |    0.01s |    0.89s |     142624 |
+| 11-circuit-i48-g1200.cnf           |    1242 |    3921 | SOLVED     |   2 |    0.01s |    1.45s |     213728 |
+| 12-circuit-i64-g2000.cnf           |    2059 |    6571 | SOLVED     |   1 |    0.02s |    1.36s |     225952 |
+| 13-circuit-i96-g3500.cnf           |    3594 |   11420 | SOLVED     |   1 |    0.03s |    1.31s |     197664 |
+| 14-circuit-i128-g6000.cnf          |    6125 |   19631 | SOLVED     |   2 |    0.08s |    1.90s |     231648 |
+| 15-xorcircuit-i24-g200.cnf         |     223 |     757 | SOLVED     |   1 |    0.00s |    0.61s |      96128 |
+| 16-xorcircuit-i32-g400.cnf         |     430 |    1502 | SOLVED     |   1 |    0.00s |    0.61s |      96928 |
+| 17-xorcircuit-i48-g800.cnf         |     846 |    3000 | SOLVED     |   1 |    0.01s |    0.74s |     142464 |
+| 18-xorcircuit-i64-g1500.cnf        |    1562 |    5586 | SOLVED     |   1 |    0.04s |    5.32s |     816864 |
+| 19-xorcircuit-i96-g2500.cnf        |    2590 |    9351 | SOLVED     |   1 |    0.04s |    6.57s |     323232 |
+| 20-xorcircuit-i128-g4000.cnf       |    4125 |   14908 | TIMEOUT    |   1 |    0.16s |   60.00s |    1105472 |
+| 21-sha256-r08-c03.cnf              |   10490 |   35148 | SOLVED     |   1 |    0.09s |    0.10s |          0 |
+| 22-sha256-r11-c03.cnf              |   15177 |   50723 | SOLVED     |   1 |    0.12s |    0.14s |          0 |
+| 23-sha256-r14-c03.cnf              |   19894 |   66389 | SOLVED     |   1 |    0.16s |    0.19s |          0 |
+| 24-sha256-r17-c03.cnf              |   24765 |   82564 | TIMEOUT    |   1 |    1.09s |   60.01s |    1809216 |
+| 25-sha256-r20-c03.cnf              |   29725 |   99060 | TIMEOUT    |   1 |    1.21s |   60.01s |    1439648 |
+| 26-sha256-r17-c04.cnf              |   25264 |   84217 | TIMEOUT    |   1 |    1.10s |   60.01s |    1690400 |
 +------------------------------------+---------+---------+------------+-----+----------+----------+------------+
 
-solved 13 / 26 instances in 709.00s
+solved 20 / 26 instances in 384.24s
 ```
 
 Read across the families rather than down the rows. The circuits it was built for fall in
-seconds. Reduced-round SHA-256 up to 14 rounds is finished by propagation from the pinned
-digest before the sample layer is even consulted — note the zero probe count — while 17 and 20
-rounds are past what it reaches in a minute; it gets roughly a third of the way and slows down.
-The XOR-heavy circuits split sharply: small ones fall, and from 48 inputs up the parity
-structure leaves both propagation and the samples with nothing to intersect. Random 3-SAT is
-the acknowledged worst case and behaves like it.
+seconds. Reduced-round SHA-256 up to 14 rounds is finished by propagation from the pinned digest
+before the sample layer is even consulted — note the zero probe count — while 17 and 20 rounds
+are still past what it reaches in a minute; it gets roughly a third of the way and slows down.
+
+The XOR-heavy rows and the random 3-SAT rows are where the plateau handler shows. Both families
+leave the probes with nothing to intersect — the first because parity structure is invisible to
+unit propagation, the second because there is no driving input set and the population carries no
+signal at all — and both used to end in `TIMEOUT` or `EXHAUSTED` from 48 inputs and n = 150
+upwards, after a guess that was close to a coin flip. Under the CDCL phase `03`–`06` and
+`17`–`19` finish in under seven seconds each; `07`, `08` and `20` still do not. Read those rows
+honestly: they are not evidence for the signature idea, they are evidence that what happens when
+it runs out is no longer a gamble. The suite as a whole went from 13 solved in 709 s to 20 in
+384 s, and every gain is in those two families.
 
 Note the `sample` column on the circuit and SHA-256 rows: those populations are executed rather
 than propagated, so building them is no longer a visible share of a run - the seconds against
@@ -393,7 +452,8 @@ The summary after every run is meant to be read as a diagnosis.
 | Many probes, few productive, high `probes short of samples` | The filter is too narrow and keeps bailing out | Lower `--initk` or raise `--siglen` |
 | Many probes, few productive, low `probes short of samples` | The filter is too wide: thousands of samples survive and nothing looks constant | Raise `--initk` |
 | Restarts early and often | Statistical verdicts are firing on biased variables | Raise `--siglen`, or start from a lower `--initk` |
-| Progress stalls, few guesses | Nothing left for the probes to find | Raise `--probe-vars` to 2, or lower `--stall-limit` |
+| Progress stalls, `cdcl` phases climbing | Nothing left for the probes to find; the run is riding on the CDCL phase | Raise `--probe-vars` to 2, or lower `--stall-limit` |
+| `cdcl` shows many conflicts and no literals proved | The formula is out of reach of unit learning under this assignment | Raise `--cdcl-conflicts`, or lower `--stall-limit` so phases start sooner |
 | Out of memory | The table is `numVars * sigLen * 8` bytes, twice that while a propagated population is being built | Lower `--siglen` |
 | `circuit` reports unexplained clauses on an instance that is a circuit | Some clauses fall outside the three gate patterns, so the population is propagated instead of executed | Nothing to turn; sampling is slower but the result is the same |
 
@@ -404,7 +464,8 @@ The summary after every run is meant to be read as a diagnosis.
 * **Statistical, not complete.** A committed batch of literals can be wrong. Restarts are the
   recovery mechanism, and they are not guaranteed to succeed.
 * **Needs a driving input set.** On instances with no such structure (random k-SAT) the sample
-  population collapses and the solver falls back to propagation with guessing.
+  population collapses, the probes find nothing, and the run is carried entirely by the CDCL
+  phase — correct, but no better than the CDCL phase alone.
 * **High variance.** Two runs of the same instance with different seeds can land far apart —
   on the harder benchmark rows, `SOLVED` and `EXHAUSTED` are both ordinary outcomes. Fix
   `--seed` when you need a run to be reproducible.

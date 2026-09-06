@@ -41,8 +41,10 @@ struct UiModel {
     uint64_t probes = 0;
     uint64_t productive = 0;
     uint64_t rejected = 0;
-    uint64_t guesses = 0;
     uint64_t resamples = 0;
+    uint64_t cdclPhases = 0;
+    uint64_t cdclConflicts = 0;
+    uint64_t cdclImplied = 0;
     uint32_t restarts = 0;
 
     int sigLen = 0;

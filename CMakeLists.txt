@@ -11,6 +11,7 @@ endif()
 
 add_executable(turbocryptosat
     src/main.cpp
+    src/cdcl.cpp
     src/cnf.cpp
     src/gates.cpp
     src/genbench.cpp

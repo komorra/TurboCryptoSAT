@@ -20,19 +20,6 @@ const char* toString(SolveStatus s) {
     return "?";
 }
 
-namespace {
-inline uint64_t popcount64(uint64_t x) {
-#if defined(__GNUC__) || defined(__clang__)
-    return static_cast<uint64_t>(__builtin_popcountll(x));
-#else
-    x = x - ((x >> 1) & 0x5555555555555555ull);
-    x = (x & 0x3333333333333333ull) + ((x >> 2) & 0x3333333333333333ull);
-    x = (x + (x >> 4)) & 0x0F0F0F0F0F0F0F0Full;
-    return (x * 0x0101010101010101ull) >> 56;
-#endif
-}
-}  // namespace
-
 struct Solver::Worker {
     Propagator prop;
     Rng rng;
@@ -426,15 +413,13 @@ bool Solver::runProbe(Worker& w) {
         return false;
     }
 
-    if (w.aliveMasks.size() == 1) {
-        // Exactly one combination survives, so it is forced and its whole
-        // closure - which is what w.sound holds - can be committed.
-        w.result = w.sound;
-        return !w.result.empty();
-    }
-
-    // The dilemma inference is sound, so it goes into the result regardless of
-    // what the samples have to say below.
+    // The sound half of the verdict, whatever the samples say below. With one
+    // surviving combination that is the failed literal rule and w.sound is its
+    // whole closure; with several it is the dilemma rule. The single survivor
+    // case deliberately falls through to the statistical layer as well: the
+    // reference implementation runs SigOutcome on the branch that lived through
+    // the other one's conflict, and that is where the filter window is at its
+    // most informative, since it now holds a literal known to be forced.
     w.result = w.sound;
 
     // A random window of the current assignment, taken in variable order so the
@@ -494,57 +479,94 @@ bool Solver::runProbe(Worker& w) {
     return !w.result.empty();
 }
 
-// Last resort when probing has stopped paying: assign the most lopsided
-// variable in the sample population to whichever value it mostly takes. A wrong
-// guess is not recoverable, which is why it only runs after a long stall and
-// after redrawing the samples has already failed to help.
-bool Solver::guessVariable() {
-    const int words = sig_.words();
-    const uint64_t* valid = sig_.validMask();
+// The answer to a plateau, in place of a guess the solver could not take back.
+//
+// A conventional CDCL search runs over the same formula with everything the
+// signature loop has committed pinned as level 0 units. Whatever it then puts
+// on its own level 0 trail is a learned unit: it follows from the formula and
+// the pinned literals alone, so handing it back is inference, not a bet. The
+// phase is bounded by a conflict budget - when it expires with nothing proven
+// the budget doubles and the probes carry on, and because the learned clauses
+// stay, the next phase resumes where this one stopped.
+bool Solver::runCdclPhase(SolveStatus& status, bool& progress) {
+    progress = false;
+    if (!opt_.cdcl) return true;
 
-    Var best = -1;
-    uint64_t bestScore = 0;
-    bool bestIsTrue = true;
+    if (!cdcl_) {
+        cdcl_.reset(new Cdcl());
+        if (!cdcl_->attach(cnf_, rng_.next())) {
+            status = SolveStatus::Exhausted;
+            return false;
+        }
+        cdclFedFromMaster_ = 0;
+        cdclRootSeen_ = cdcl_->rootTrail().size();
+        cdclBudget_ = opt_.cdclConflicts;
+    }
 
-    for (int tries = 0; tries < 96; ++tries) {
-        const Var v = static_cast<Var>(rng_.below(static_cast<uint32_t>(cnf_.numVars)));
-        if (master_.assigned(v)) continue;
-        const uint64_t* s = sig_.var(v);
-        uint64_t ones = 0, total = 0;
-        for (int i = 0; i < words; ++i) {
-            const uint64_t k = valid[i];
-            ones += popcount64(s[i] & k);
-            total += popcount64(k);
-        }
-        if (total == 0) {
-            best = v;
-            bestIsTrue = rng_.coin();
-            break;
-        }
-        const uint64_t zeros = total - ones;
-        const uint64_t score = ones > zeros ? ones : zeros;
-        if (best < 0 || score > bestScore) {
-            best = v;
-            bestScore = score;
-            bestIsTrue = ones >= zeros;
+    // Pin everything the signature loop has committed since the last phase.
+    const std::vector<Lit>& mt = master_.trail();
+    for (; cdclFedFromMaster_ < mt.size(); ++cdclFedFromMaster_) {
+        if (!cdcl_->addRoot(mt[cdclFedFromMaster_])) {
+            status = SolveStatus::Exhausted;  // the assignment is refuted
+            return false;
         }
     }
-    if (best < 0) {
-        for (Var v = 0; v < cnf_.numVars; ++v) {
-            if (!master_.assigned(v)) { best = v; bestIsTrue = rng_.coin(); break; }
-        }
-    }
-    if (best < 0) return true;
+    cdclRootSeen_ = std::max(cdclRootSeen_, cdcl_->rootTrail().size());
 
-    ++stats_.guesses;
-    // mkLit takes "is negated", so !bestIsTrue puts the majority value first.
-    for (int pass = 0; pass < 2; ++pass) {
-        const size_t m = master_.mark();
-        const Lit l = mkLit(best, pass == 0 ? !bestIsTrue : bestIsTrue);
-        if (master_.enqueue(l) && master_.propagate()) return true;
-        master_.undoTo(m);
+    ++stats_.cdclPhases;
+    tick("cdcl");
+    const uint64_t conflictsBefore = cdcl_->conflicts();
+    auto cancelled = [this] {
+        if (interruptRequested()) return true;
+        return opt_.timeout > 0.0 &&
+               static_cast<double>(nowNs() - startNs_) * 1e-9 > opt_.timeout;
+    };
+    const CdclResult r = cdcl_->run(cdclBudget_, cancelled);
+    stats_.cdclConflicts += cdcl_->conflicts() - conflictsBefore;
+    stats_.cdclLearned = cdcl_->learnedClauses();
+
+    switch (r) {
+        case CdclResult::Implied: {
+            const std::vector<Lit>& rt = cdcl_->rootTrail();
+            cdclNew_.assign(rt.begin() + static_cast<std::ptrdiff_t>(cdclRootSeen_), rt.end());
+            cdclRootSeen_ = rt.size();
+            stats_.cdclImplied += cdclNew_.size();
+            bool conflict = false;
+            progress = applyLiterals(cdclNew_, conflict);
+            if (conflict) {
+                status = SolveStatus::Exhausted;
+                return false;
+            }
+            return true;
+        }
+        case CdclResult::Solved: {
+            // The search finished the instance outright. Its model extends the
+            // pinned assignment, so it drops straight into master_.
+            const std::vector<int8_t>& m = cdcl_->model();
+            for (Var v = 0; v < cnf_.numVars; ++v) {
+                if (!master_.enqueue(mkLit(v, m[static_cast<size_t>(v)] < 0))) {
+                    status = SolveStatus::Exhausted;
+                    return false;
+                }
+            }
+            if (!master_.propagate()) {
+                status = SolveStatus::Exhausted;
+                return false;
+            }
+            progress = true;
+            return true;
+        }
+        case CdclResult::RootConflict:
+            status = SolveStatus::Exhausted;
+            return false;
+        case CdclResult::Aborted:
+            status = interruptRequested() ? SolveStatus::Interrupted : SolveStatus::Timeout;
+            return false;
+        case CdclResult::Budget:
+        default:
+            cdclBudget_ *= 2;
+            return true;
     }
-    return false;  // both polarities refuted: the current assignment is dead
 }
 
 bool Solver::applyLiterals(const std::vector<Lit>& lits, bool& conflict) {
@@ -650,8 +672,8 @@ bool Solver::attempt(SolveStatus& status) {
         } else if (++stall > stallLimit) {
             stall = 0;
             // A plateau means the probes have stopped finding agreement. Fresh
-            // randomness is a cheaper and far safer response than a guess, so
-            // redraw the sample population first and only gamble once a new
+            // randomness is the cheapest response, so redraw the sample
+            // population first and only fall through to a CDCL phase once a new
             // population has failed to help either.
             // ...but only while redrawing stays cheap relative to the run.
             // On a large instance a population costs seconds to build, and
@@ -674,10 +696,9 @@ bool Solver::attempt(SolveStatus& status) {
                     continue;
                 }
             }
-            if (!guessVariable()) {
-                status = SolveStatus::Exhausted;
-                return false;
-            }
+            bool cdclProgress = false;
+            if (!runCdclPhase(status, cdclProgress)) return false;
+            if (cdclProgress) resamplesSinceProgress = 0;
         }
 
         tick("solving");
@@ -761,6 +782,14 @@ SolveResult Solver::solve() {
         for (auto& w : workers_) {
             w->prop.undoTo(0);
             w->synced = 0;
+        }
+        // Learned clauses are implied by the assignment this restart retracts,
+        // so they go with it.
+        if (cdcl_) {
+            cdcl_->reset();
+            cdclFedFromMaster_ = 0;
+            cdclRootSeen_ = cdcl_->rootTrail().size();
+            cdclBudget_ = opt_.cdclConflicts;
         }
 
         if (a > 1 && !opt_.keepSamples) {

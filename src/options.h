@@ -38,6 +38,12 @@ struct Options {
     bool keepSamples = false;    // reuse the sample population across restarts
     long long stallLimit = -1;   // -1 -> 1000 barren rounds
     int sampleRounds = 12;       // retry rounds while building the samples
+
+    // What the solver does when the probes plateau: a bounded CDCL search over
+    // the same formula, with everything committed so far pinned at level 0. The
+    // budget is per phase and doubles whenever a phase proves nothing.
+    bool cdcl = true;
+    uint64_t cdclConflicts = 10000;  // 0 -> bounded only by --timeout
 };
 
 }  // namespace tcs

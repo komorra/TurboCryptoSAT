@@ -44,7 +44,7 @@ void printUsage() {
         "\n"
         "SEARCH OPTIONS\n"
         "  --siglen <n>          64-bit lanes per variable. Default 1024 (65536 samples).\n"
-        "  --initk <n>           Assigned literals mixed into each probe. Default 4.\n"
+        "  --initk <n>           Assigned literals mixed into each probe. Default 8.\n"
         "                        Each one roughly halves the surviving sample set,\n"
         "                        so raising it sharpens the filter but invites\n"
         "                        verdicts drawn from too few samples.\n"
@@ -53,8 +53,13 @@ void printUsage() {
         "  --threads <n>         Worker threads. Default: number of hardware threads.\n"
         "  --attempts <n>        Restarts after a conflict. Default 5.\n"
         "  --stall-limit <n>     Barren rounds before the sample population is\n"
-        "                        redrawn and, failing that, a variable is guessed.\n"
+        "                        redrawn and, failing that, a CDCL phase is run.\n"
         "                        Default 1000.\n"
+        "  --cdcl-conflicts <n>  Conflict budget for one CDCL phase, doubled every\n"
+        "                        time a phase proves nothing. Default 10000;\n"
+        "                        0 means bounded only by --timeout.\n"
+        "  --no-cdcl             Never run a CDCL phase; plateaus are answered by\n"
+        "                        resampling and further probing only.\n"
         "  --sample-rounds <n>   Retry rounds while building the samples. Default 12.\n"
         "  --keep-samples        Reuse the sample population across restarts.\n"
         "  --timeout <sec>       Abort after the given number of seconds.\n"
@@ -202,6 +207,12 @@ bool parseArgs(int argc, char** argv, Options& opt, int& exitCode) {
             const char* v = need("--stall-limit");
             if (!v || !parseIntArg(v, n) || n < 0) { exitCode = 1; return false; }
             opt.stallLimit = n;
+        } else if (a == "--cdcl-conflicts") {
+            const char* v = need("--cdcl-conflicts");
+            if (!v || !parseIntArg(v, n) || n < 0) { exitCode = 1; return false; }
+            opt.cdclConflicts = static_cast<uint64_t>(n);
+        } else if (a == "--no-cdcl") {
+            opt.cdcl = false;
         } else if (a == "--sample-rounds") {
             const char* v = need("--sample-rounds");
             if (!v || !parseIntArg(v, n) || n < 1) { exitCode = 1; return false; }
@@ -388,8 +399,10 @@ RunOutcome runInstance(const Options& opt, const std::string& path, bool interac
         model.probes = st.probes;
         model.productive = st.productiveProbes;
         model.rejected = st.rejectedResults;
-        model.guesses = st.guesses;
         model.resamples = st.resamples;
+        model.cdclPhases = st.cdclPhases;
+        model.cdclConflicts = st.cdclConflicts;
+        model.cdclImplied = st.cdclImplied;
         model.restarts = st.restarts;
         model.validSamples = st.validSamples;
         model.totalSamples = st.totalSamples;
@@ -470,11 +483,16 @@ void printSummary(const RunOutcome& r, const std::string& path) {
                 static_cast<unsigned long long>(s.validSamples),
                 static_cast<unsigned long long>(s.totalSamples), s.sampleSeconds);
     std::printf("  resamples    %llu\n", static_cast<unsigned long long>(s.resamples));
-    std::printf("  probes       %llu (productive %llu, rejected %llu, guesses %llu)\n",
+    std::printf("  probes       %llu (productive %llu, rejected %llu)\n",
                 static_cast<unsigned long long>(s.probes),
                 static_cast<unsigned long long>(s.productiveProbes),
-                static_cast<unsigned long long>(s.rejectedResults),
-                static_cast<unsigned long long>(s.guesses));
+                static_cast<unsigned long long>(s.rejectedResults));
+    std::printf("  cdcl         %llu phases, %llu conflicts, %llu literals proved, "
+                "%llu clauses learned\n",
+                static_cast<unsigned long long>(s.cdclPhases),
+                static_cast<unsigned long long>(s.cdclConflicts),
+                static_cast<unsigned long long>(s.cdclImplied),
+                static_cast<unsigned long long>(s.cdclLearned));
     std::printf("  signatures   %llu verdicts, %llu probes short of samples\n",
                 static_cast<unsigned long long>(s.signatureVerdicts),
                 static_cast<unsigned long long>(s.signatureBails));

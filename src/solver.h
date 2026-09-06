@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 
+#include "cdcl.h"
 #include "cnf.h"
 #include "gates.h"
 #include "options.h"
@@ -43,8 +44,11 @@ struct SolveStats {
     uint64_t rejectedResults = 0;
     uint64_t signatureVerdicts = 0;
     uint64_t signatureBails = 0;
-    uint64_t guesses = 0;
     uint64_t resamples = 0;
+    uint64_t cdclPhases = 0;      // bounded CDCL runs started at a plateau
+    uint64_t cdclConflicts = 0;   // conflicts they analysed
+    uint64_t cdclImplied = 0;     // literals they proved and handed back
+    uint64_t cdclLearned = 0;     // clauses currently in the CDCL database
     uint32_t attempt = 1;
     uint32_t restarts = 0;
     double sampleSeconds = 0.0;
@@ -95,7 +99,10 @@ private:
     bool runProbe(Worker& w);
     void signatureOutcome(Worker& w, const std::vector<Lit>& forced, std::vector<Lit>& out);
     static void intersectLits(Worker& w, std::vector<Lit>& dst, const std::vector<Lit>& other);
-    bool guessVariable();
+    // Bounded CDCL phase run in place of a guess when the probes plateau.
+    // `progress` says whether it moved the assignment; the return value is
+    // false only when the attempt is over (refuted, interrupted, out of time).
+    bool runCdclPhase(SolveStatus& status, bool& progress);
     bool verify() const;
     void tick(const char* phase);
 
@@ -117,6 +124,15 @@ private:
     std::vector<Lit> sampleFixed_; // units that constrain the sample population
     std::vector<Var> inputVars_;
     std::vector<Lit> sortedInit_;  // assigned literals in variable order
+
+    // Kept alive across phases within one attempt so its learned clauses carry
+    // over; dropped on a restart, since they are implied by the assignment the
+    // restart retracts.
+    std::unique_ptr<Cdcl> cdcl_;
+    size_t cdclFedFromMaster_ = 0;  // how far into master_'s trail was pinned
+    size_t cdclRootSeen_ = 0;       // how far into its level 0 trail was read
+    uint64_t cdclBudget_ = 0;       // conflicts allowed in the next phase
+    std::vector<Lit> cdclNew_;
 
     std::unique_ptr<ThreadPool> pool_;
     std::vector<std::unique_ptr<Worker>> workers_;
