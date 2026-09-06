@@ -1,6 +1,7 @@
 #include "tune.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -52,17 +53,33 @@ struct Score {
     bool full() const { return runs > 0 && solved == runs; }
 };
 
-// Ordering the search optimises, straight from the brief: more variables
-// correctly assigned wins; among settings that finish the instance outright,
-// the faster one wins.
+// How close two partial results have to be before the difference is treated as
+// seed noise rather than signal. Measured: across a whole preset sweep of a
+// 17-round SHA-256 preimage every setting landed between 31.0% and 33.4%, so
+// anything inside a couple of points is not a ranking, it is a coin flip.
+constexpr double kNoise = 0.02;
+
+// Ordering the search optimises: more variables correctly assigned wins, and
+// among settings that finish the instance outright, the faster one wins.
 //
-// Time is deliberately *not* a tie-break for partial results. A trial that
-// reached 40% and then committed a wrong literal after two seconds is not better
-// than one that reached 40% and was still going at the timeout - rewarding the
-// first would select for settings that fail fast.
+// Two refinements, both there to stop the search chasing noise:
+//
+// Time is not a tie-break between partial results. A trial that reached 40% and
+// then committed a wrong literal after two seconds is not better than one that
+// reached 40% and was still going at the timeout - rewarding the first would
+// select for settings that fail fast.
+//
+// When neither setting finishes and their progress is within the noise band, the
+// one that went wrong fewer times wins. A run that poisons the assignment can
+// never solve the instance no matter how long it is given; a run that merely
+// stalls still might. Progress outside the band still decides on its own, so
+// this only settles ties.
 bool better(const Score& a, const Score& b) {
     if (a.full() != b.full()) return a.full();
     if (a.full()) return a.seconds < b.seconds;
+    if (a.frac > b.frac + kNoise) return true;
+    if (b.frac > a.frac + kNoise) return false;
+    if (a.wrong != b.wrong) return a.wrong < b.wrong;
     return a.frac > b.frac;
 }
 
@@ -282,9 +299,6 @@ int runTune(const Options& opt) {
     }
 
     const int seeds = std::max(1, opt.tuneSeeds);
-    size_t trialsPlanned = 0;
-    for (const Axis& a : axes) trialsPlanned += a.values.size();
-
     std::printf("TurboCryptoSAT tuning - preset %s, %zu instance%s, %d seed%s per setting,"
                 " %.0fs per trial\n",
                 opt.tunePreset.c_str(), targets.size(), targets.size() == 1 ? "" : "s",
@@ -304,9 +318,24 @@ int runTune(const Options& opt) {
                static_cast<double>(nowNs() - start) * 1e-9 > opt.tuneBudget;
     };
 
+    // Every setting the search has already measured. Without this the second
+    // pass re-runs the whole first pass verbatim whenever the winner did not
+    // move, which is half the budget spent reproducing known numbers.
+    std::vector<std::array<long long, 6>> seen;
+    auto key = [](const Params& p) {
+        return std::array<long long, 6>{p.sigLen, p.initk, p.mink, p.stallLimit,
+                                        p.probeVars, p.sampleRounds};
+    };
+    auto known = [&](const Params& p) {
+        const auto k = key(p);
+        return std::find(seen.begin(), seen.end(), k) != seen.end();
+    };
+
     Score bestScore = evaluate(opt, best, targets, seeds);
+    seen.push_back(key(best));
     report("baseline", best, bestScore);
     size_t trials = 1;
+    int solvedAnywhere = bestScore.solved;
 
     // Coordinate descent: one axis at a time, each evaluated against the best
     // settings found so far. A full grid over six axes is thousands of trials;
@@ -328,8 +357,11 @@ int runTune(const Options& opt) {
                     if (static_cast<long long>(best.*(a.slotInt)) == v) continue;
                     cand.*(a.slotInt) = static_cast<int>(v);
                 }
+                if (known(cand)) continue;
                 const Score s = evaluate(opt, cand, targets, seeds);
+                seen.push_back(key(cand));
                 ++trials;
+                solvedAnywhere += s.solved;
                 report("try", cand, s);
                 if (better(s, bestScore)) {
                     bestScore = s;
@@ -347,7 +379,7 @@ int runTune(const Options& opt) {
     if (interruptRequested()) std::printf("  interrupted - reporting the best found so far\n");
     else if (outOfBudget()) std::printf("  budget spent - reporting the best found so far\n");
 
-    std::printf("  trials       %zu of %zu planned in %s\n", trials, trialsPlanned + 1,
+    std::printf("  trials       %zu distinct settings in %s\n", trials,
                 formatDuration(elapsed).c_str());
     std::printf("  best         %s\n", describe(best).c_str());
     if (bestScore.full()) {
@@ -357,6 +389,14 @@ int runTune(const Options& opt) {
         std::printf("  result       %.1f%% of variables on average, solved %d/%d runs,"
                     " %d ended on a wrong literal\n",
                     100.0 * bestScore.frac, bestScore.solved, bestScore.runs, bestScore.wrong);
+    }
+    if (solvedAnywhere == 0) {
+        std::printf("\n  WARNING  no setting solved the instance in %.0fs, so every trial was\n"
+                    "           ranked on partial progress - and on a hard instance that spread\n"
+                    "           is mostly seed noise. Raise --tune-timeout above the time a\n"
+                    "           successful run actually takes, or --tune-seeds, before trusting\n"
+                    "           this answer.\n",
+                    opt.tuneTrialTimeout);
     }
     std::printf("\n  turbocryptosat <instance.cnf> %s\n\n", describe(best).c_str());
     return 0;

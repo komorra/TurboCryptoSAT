@@ -577,13 +577,10 @@ bool Solver::runCdclPhase(SolveStatus& status, bool& progress) {
                 status = SolveStatus::Exhausted;
                 return false;
             }
-            if (oracleBroken(0)) {
-                // A different satisfying assignment, not a wrong one - but the
-                // tuning run is measuring progress towards *this* solution, so
-                // it stops here either way.
-                status = SolveStatus::OracleMismatch;
-                return false;
-            }
+            // No oracle check here on purpose. This model satisfies the whole
+            // formula, so the instance is solved even when it is a different
+            // solution from the one a tuning run was handed - the oracle exists
+            // to cut short a run that has wandered off, not to reject an answer.
             progress = true;
             return true;
         }

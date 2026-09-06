@@ -502,10 +502,13 @@ second, so ruling a bad setting out is nearly free. It is only ever a check: not
 search reads it to decide anything, which is what makes the resulting parameters mean something
 on an instance nobody has solved yet.
 
-Settings are ranked exactly as you would want: more variables correctly assigned wins, and among
-settings that finish the instance outright, the faster one wins. Time is deliberately not a
-tie-break between partial results — rewarding a trial that reached 40 % and died after two
-seconds over one still going at the timeout would select for settings that fail fast.
+Settings are ranked so that more variables correctly assigned wins, and among settings that
+finish the instance outright, the faster one wins. Two refinements keep the search off the noise
+floor. Time is not a tie-break between partial results — rewarding a trial that reached 40 % and
+died after two seconds over one still going at the timeout would select for settings that fail
+fast. And when neither setting finishes and their progress is within two points of each other,
+the one that went wrong fewer times wins: a run that poisons the assignment can never solve the
+instance however long it is given, while one that merely stalls still might.
 
 The search is coordinate descent over `initk`, `mink`, `siglen`, `stall-limit`, `probe-vars` and
 `sample-rounds`, in that order, one axis at a time against the best found so far. A full grid
@@ -526,12 +529,20 @@ Output ends with a command line you can paste:
   result       SOLVED on every run (2/2), 0.56s average
 ```
 
-**One caveat worth knowing.** The check is "did this run reproduce *that* solution", not "is this
-run heading somewhere satisfiable". On an instance with more than one solution — circuit
-inversion where the output layer has several preimages, for instance — a trial that is quietly
-finding a different valid answer is scored as wrong. Watch the `wrong` column: if it is high
-across every setting, the instance likely has many solutions and the ranking is measuring
-agreement with one of them rather than difficulty.
+**Set `--tune-timeout` above the time a successful run actually takes.** This is the one way to
+get a meaningless answer out of the mode. If no trial ever finishes, every setting is ranked on
+partial progress, and on a hard instance that spread is almost entirely seed noise — in one
+measured sweep of a 17-round SHA-256 preimage at a 40 s trial budget, all twenty-five settings
+landed between 31.0 % and 33.4 %, and the "winner" led by 0.3 points. The mode prints a warning
+when nothing solved; take it seriously rather than pasting the command line it suggests.
+
+**A run that assigns every variable counts as solved even if it is a different solution.** The
+oracle exists to cut short a run that has wandered off, not to reject an answer, so a complete
+satisfying assignment is never scored as wrong. What it does still reject is a *partial* run that
+has diverged, and on an instance with several solutions — circuit inversion where the output
+layer has more than one preimage — some of those divergences were heading somewhere perfectly
+valid. Watch the `wrong` column: if it stays high across every setting while runs do finish, the
+ranking is measuring agreement with one particular solution more than it is measuring difficulty.
 
 The summary after every run is meant to be read as a diagnosis.
 
