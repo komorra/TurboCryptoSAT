@@ -18,9 +18,9 @@ struct Options {
     bool inputsGiven = false;
 
     int sigLen = 1024;           // 64-bit lanes per variable (1024 -> 65536 samples)
-    int initk = 8;               // literals taken from the current assignment per probe;
+    int initk = 6;               // literals taken from the current assignment per probe;
                                  // halved on every restart
-    int mink = 32;               // minimum surviving sample words for a signature verdict
+    int mink = 10;               // minimum surviving sample words for a signature verdict
     int probeVars = 1;           // variables probed at once (2^probeVars combinations)
 
     std::vector<int> outputs;    // DIMACS literals pinning the target valuation

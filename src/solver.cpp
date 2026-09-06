@@ -109,6 +109,22 @@ bool Solver::prepareBase(std::string& error) {
     }
     master_.attach(cnf_);
 
+    // Variables that occur in no clause at all. DIMACS files that declare fewer
+    // variables than their largest index leave gaps like this, and the loader
+    // widens numVars to whatever it sees, so the gaps become variables. Any
+    // value satisfies the formula, but the solver still has to assign every one
+    // of them before it can call the instance done - and left to the probe loop
+    // that happens one statistical accident at a time. Pin them here instead:
+    // they land in the base trail, so a restart keeps them.
+    stats_.unusedVars = 0;
+    for (Var v = 0; v < cnf_.numVars; ++v) {
+        const size_t p = static_cast<size_t>(v) * 2u;
+        if (cnf_.occStart[p] == cnf_.occStart[p + 2]) {
+            master_.enqueue(mkLit(v, false));
+            ++stats_.unusedVars;
+        }
+    }
+
     targetLits_.clear();
     sampleFixed_.clear();
     if (opt_.outputsGiven) {

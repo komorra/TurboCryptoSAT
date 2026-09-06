@@ -44,11 +44,11 @@ void printUsage() {
         "\n"
         "SEARCH OPTIONS\n"
         "  --siglen <n>          64-bit lanes per variable. Default 1024 (65536 samples).\n"
-        "  --initk <n>           Assigned literals mixed into each probe. Default 8.\n"
+        "  --initk <n>           Assigned literals mixed into each probe. Default 6.\n"
         "                        Each one roughly halves the surviving sample set,\n"
         "                        so raising it sharpens the filter but invites\n"
         "                        verdicts drawn from too few samples.\n"
-        "  --mink <n>            Minimum surviving sample words for a verdict. Default 32.\n"
+        "  --mink <n>            Minimum surviving sample words for a verdict. Default 10.\n"
         "  --probe-vars <n>      Variables probed at once (2^n branches). Default 1.\n"
         "  --threads <n>         Worker threads. Default: number of hardware threads.\n"
         "  --attempts <n>        Restarts after a conflict. Default 5.\n"
@@ -483,6 +483,10 @@ void printSummary(const RunOutcome& r, const std::string& path) {
                 static_cast<unsigned long long>(s.validSamples),
                 static_cast<unsigned long long>(s.totalSamples), s.sampleSeconds);
     std::printf("  resamples    %llu\n", static_cast<unsigned long long>(s.resamples));
+    if (s.unusedVars) {
+        std::printf("  unused vars  %llu assigned up front, mentioned by no clause\n",
+                    static_cast<unsigned long long>(s.unusedVars));
+    }
     std::printf("  probes       %llu (productive %llu, rejected %llu)\n",
                 static_cast<unsigned long long>(s.probes),
                 static_cast<unsigned long long>(s.productiveProbes),

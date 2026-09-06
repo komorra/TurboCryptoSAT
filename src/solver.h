@@ -56,6 +56,7 @@ struct SolveStats {
     uint64_t validSamples = 0;
     uint64_t totalSamples = 0;
     uint64_t signatureBytes = 0;
+    uint64_t unusedVars = 0;     // variables no clause mentions
     uint64_t gates = 0;          // gates recovered from the clauses
     uint64_t unexplained = 0;    // clauses no recovered gate accounts for
     bool gateSampling = false;   // samples produced by executing them

@@ -245,8 +245,8 @@ turbocryptosat sha256_17.cnf \
 | `--outputs-file <f>` | Read the target valuation from a file | — |
 | `--out <file>` | Solution path | `<instance>.solution.cnf` |
 | `--siglen <n>` | 64-bit lanes per variable; `n * 64` samples | `1024` |
-| `--initk <n>` | Literals of the assignment each probe filters the samples with; halved on every restart | `8` |
-| `--mink <n>` | Minimum surviving sample words for a signature verdict | `32` |
+| `--initk <n>` | Literals of the assignment each probe filters the samples with; halved on every restart | `6` |
+| `--mink <n>` | Minimum surviving sample words for a signature verdict | `10` |
 | `--probe-vars <n>` | Variables probed at once, giving `2^n` branches | `1` |
 | `--threads <n>` | Worker threads | hardware threads |
 | `--attempts <n>` | Restarts after a conflict | `5` |
@@ -381,29 +381,29 @@ suite on a 16-core / 32-thread desktop, default settings, 60 seconds per instanc
 | 04-rand3sat-n220.cnf               |     220 |     924 | SOLVED     |   1 |    0.08s |    0.28s |      32032 |
 | 05-rand3sat-n320.cnf               |     320 |    1360 | SOLVED     |   1 |    0.11s |    0.64s |      64064 |
 | 06-rand3sat-n450.cnf               |     450 |    1912 | SOLVED     |   1 |    0.18s |    0.42s |      32032 |
-| 07-rand3sat-n650.cnf               |     650 |    2769 | TIMEOUT    |   1 |    0.73s |   60.00s |     320320 |
-| 08-rand3sat-n900.cnf               |     900 |    3834 | TIMEOUT    |   1 |    1.13s |   60.00s |     320320 |
-| 09-circuit-i24-g300.cnf            |     322 |     981 | SOLVED     |   1 |    0.00s |    0.55s |      96160 |
-| 10-circuit-i32-g600.cnf            |     625 |    1959 | SOLVED     |   1 |    0.01s |    0.89s |     142624 |
-| 11-circuit-i48-g1200.cnf           |    1242 |    3921 | SOLVED     |   2 |    0.01s |    1.45s |     213728 |
-| 12-circuit-i64-g2000.cnf           |    2059 |    6571 | SOLVED     |   1 |    0.02s |    1.36s |     225952 |
-| 13-circuit-i96-g3500.cnf           |    3594 |   11420 | SOLVED     |   1 |    0.03s |    1.31s |     197664 |
-| 14-circuit-i128-g6000.cnf          |    6125 |   19631 | SOLVED     |   2 |    0.08s |    1.90s |     231648 |
-| 15-xorcircuit-i24-g200.cnf         |     223 |     757 | SOLVED     |   1 |    0.00s |    0.61s |      96128 |
-| 16-xorcircuit-i32-g400.cnf         |     430 |    1502 | SOLVED     |   1 |    0.00s |    0.61s |      96928 |
-| 17-xorcircuit-i48-g800.cnf         |     846 |    3000 | SOLVED     |   1 |    0.01s |    0.74s |     142464 |
-| 18-xorcircuit-i64-g1500.cnf        |    1562 |    5586 | SOLVED     |   1 |    0.04s |    5.32s |     816864 |
-| 19-xorcircuit-i96-g2500.cnf        |    2590 |    9351 | SOLVED     |   1 |    0.04s |    6.57s |     323232 |
-| 20-xorcircuit-i128-g4000.cnf       |    4125 |   14908 | TIMEOUT    |   1 |    0.16s |   60.00s |    1105472 |
-| 21-sha256-r08-c03.cnf              |   10490 |   35148 | SOLVED     |   1 |    0.09s |    0.10s |          0 |
-| 22-sha256-r11-c03.cnf              |   15177 |   50723 | SOLVED     |   1 |    0.12s |    0.14s |          0 |
-| 23-sha256-r14-c03.cnf              |   19894 |   66389 | SOLVED     |   1 |    0.16s |    0.19s |          0 |
-| 24-sha256-r17-c03.cnf              |   24765 |   82564 | TIMEOUT    |   1 |    1.09s |   60.01s |    1809216 |
-| 25-sha256-r20-c03.cnf              |   29725 |   99060 | TIMEOUT    |   1 |    1.21s |   60.01s |    1439648 |
-| 26-sha256-r17-c04.cnf              |   25264 |   84217 | TIMEOUT    |   1 |    1.10s |   60.01s |    1690400 |
+| 07-rand3sat-n650.cnf               |     650 |    2769 | TIMEOUT    |   1 |    0.74s |   60.00s |     320320 |
+| 08-rand3sat-n900.cnf               |     900 |    3834 | TIMEOUT    |   1 |    1.21s |   60.00s |     320320 |
+| 09-circuit-i24-g300.cnf            |     322 |     981 | SOLVED     |   1 |    0.00s |    0.78s |      96096 |
+| 10-circuit-i32-g600.cnf            |     625 |    1959 | SOLVED     |   1 |    0.01s |    1.71s |     215360 |
+| 11-circuit-i48-g1200.cnf           |    1242 |    3921 | SOLVED     |   1 |    0.01s |    1.67s |     199552 |
+| 12-circuit-i64-g2000.cnf           |    2059 |    6571 | SOLVED     |   1 |    0.03s |    1.86s |     219008 |
+| 13-circuit-i96-g3500.cnf           |    3594 |   11420 | SOLVED     |   1 |    0.04s |    3.89s |     406432 |
+| 14-circuit-i128-g6000.cnf          |    6125 |   19631 | SOLVED     |   2 |    0.07s |    4.06s |     331584 |
+| 15-xorcircuit-i24-g200.cnf         |     223 |     757 | SOLVED     |   1 |    0.00s |    0.78s |      96128 |
+| 16-xorcircuit-i32-g400.cnf         |     430 |    1502 | SOLVED     |   1 |    0.00s |    0.79s |      96512 |
+| 17-xorcircuit-i48-g800.cnf         |     846 |    3000 | SOLVED     |   1 |    0.01s |    1.09s |     134528 |
+| 18-xorcircuit-i64-g1500.cnf        |    1562 |    5586 | SOLVED     |   1 |    0.03s |    2.69s |     294560 |
+| 19-xorcircuit-i96-g2500.cnf        |    2590 |    9351 | SOLVED     |   1 |    0.03s |   11.80s |     224256 |
+| 20-xorcircuit-i128-g4000.cnf       |    4125 |   14908 | TIMEOUT    |   1 |    0.06s |   60.00s |     391872 |
+| 21-sha256-r08-c03.cnf              |   10490 |   35148 | SOLVED     |   1 |    0.08s |    0.09s |          0 |
+| 22-sha256-r11-c03.cnf              |   15177 |   50723 | SOLVED     |   1 |    0.11s |    0.13s |          0 |
+| 23-sha256-r14-c03.cnf              |   19894 |   66389 | SOLVED     |   1 |    0.15s |    0.17s |          0 |
+| 24-sha256-r17-c03.cnf              |   24765 |   82564 | TIMEOUT    |   1 |    0.33s |   60.01s |     440640 |
+| 25-sha256-r20-c03.cnf              |   29725 |   99060 | TIMEOUT    |   1 |    0.72s |   60.01s |     950400 |
+| 26-sha256-r17-c04.cnf              |   25264 |   84217 | TIMEOUT    |   1 |    0.51s |   60.01s |     615616 |
 +------------------------------------+---------+---------+------------+-----+----------+----------+------------+
 
-solved 20 / 26 instances in 384.24s
+solved 20 / 26 instances in 394.02s
 ```
 
 Read across the families rather than down the rows. The circuits it was built for fall in
@@ -415,11 +415,11 @@ The XOR-heavy rows and the random 3-SAT rows are where the plateau handler shows
 leave the probes with nothing to intersect — the first because parity structure is invisible to
 unit propagation, the second because there is no driving input set and the population carries no
 signal at all — and both used to end in `TIMEOUT` or `EXHAUSTED` from 48 inputs and n = 150
-upwards, after a guess that was close to a coin flip. Under the CDCL phase `03`–`06` and
-`17`–`19` finish in under seven seconds each; `07`, `08` and `20` still do not. Read those rows
-honestly: they are not evidence for the signature idea, they are evidence that what happens when
-it runs out is no longer a gamble. The suite as a whole went from 13 solved in 709 s to 20 in
-384 s, and every gain is in those two families.
+upwards, after a guess that was close to a coin flip. Under the CDCL phase `03`–`06` finish in
+under a second each and `17`–`19` in under twelve; `07`, `08` and `20` still do not. Read those
+rows honestly: they are not evidence for the signature idea, they are evidence that what happens
+when it runs out is no longer a gamble. The suite as a whole went from 13 solved in 709 s to 20
+in 394 s, and every gain is in those two families.
 
 Note the `sample` column on the circuit and SHA-256 rows: those populations are executed rather
 than propagated, so building them is no longer a visible share of a run - the seconds against
@@ -444,28 +444,44 @@ ctest --test-dir build          # smoke tests
 ## Tuning
 
 `--initk` and `--mink` together decide whether the statistical layer says anything at all, and
-the defaults are not the right pair for every encoding. A worked example, a 17-round SHA-256
-preimage with a 3-byte message:
+they are the two knobs worth sweeping before concluding an instance is out of reach. The
+defaults, `6` and `10`, were picked on a 17-round SHA-256 preimage; here is the measurement, so
+you can see how narrow the useful band is.
 
-```
-turbocryptosat sha256-r17-c03.cnf --initk 6 --mink 10
-  -> SOLVED (verified) in 117s, first attempt
-     probes 1520224 (productive 139), resamples 30
-     cdcl 6 phases, 204056 conflicts, 1 literal proved
-```
+First a grid at `--attempts 1` (so `initk` means one thing — with restarts it halves down the
+ladder), two seeds per cell, 45 s each, showing how far the run got:
 
-Two things are worth reading off that. `--initk 6` leaves roughly four times as many samples
-under the filter as the default 8, and `--mink 10` lets a verdict stand on far fewer surviving
-words; below that pair the filter finds constants, above it the intersection comes back empty
-round after round. And the CDCL phase proved *one* literal in 204 000 conflicts — the run was
-carried by the probe loop and by 30 cheap redraws of the population, which is what the plateau
-handler is supposed to look like on an instance the sample layer suits.
+| `initk` | `mink 8` | `mink 16` | `mink 32` | productive probes |
+| --- | --- | --- | --- | --- |
+| 4 | 33 %, 33 % | 33 %, SOLVED | 33 %, 33 % | 78–94 |
+| 5 | 33 %, 33 % | 33 %, 33 % | 33 %, 33 % | 85–120 |
+| **6** | **41 %, 38 %** | 34 %, 34 % | 33 %, 33 % | 129–273 |
+| 7 | EXHAUSTED 3 s, 1 s | EXHAUSTED 18 s, 4 s | 33 %, 33 % | 105–327 |
+| 8 | EXHAUSTED 0.4 s, 0.7 s | EXHAUSTED 9 s, 4 s | 35 %, 34 % | 100–289 |
 
-The same pair makes no measurable difference on the shipped suite (20 of 26 either way), so it
-is a knob to reach for per encoding rather than a better default. Instances differ more than the
-round count suggests: the SHA-256 instance above leaves 13 978 variables that no recovered gate
-defines, while `24-sha256-r17-c03.cnf` in this repository leaves 24, and that one is out of
-reach at any setting tried so far.
+Read it as a cliff, not a slope. Below `initk 6` the filter is too wide and every run parks
+within fifty variables of the same wall at 33 %. At `initk 6` the productive probe count roughly
+doubles and the run starts moving. At `initk 7` the verdicts are still plentiful but they are
+*wrong*, and the assignment gets refuted by plain propagation in seconds. `mink 32` — the old
+default — suppresses the layer at every `initk`.
+
+Then the solve rate at the shipping configuration (`--attempts 5`, 120 s, six seeds):
+
+| setting | solved | when it did not |
+| --- | --- | --- |
+| `--initk 6 --mink 10` | **2 / 6** (71 s, 99 s) | 38–43 % |
+| `--initk 6 --mink 8` | 0 / 6 | 34–50 % |
+| `--initk 8 --mink 32` (old default) | 0 / 6 | 39–45 % |
+
+Two solves out of six is not a significant result on its own, and it is worth being blunt about
+that: the case for the new pair is the grid above, plus the fact that the shipped benchmark suite
+is indifferent to the change (20 of 26 either way). What the numbers do rule out is the old
+default, which never once broke the wall.
+
+Note also what was *not* the lever. Across those runs the CDCL phase proved anywhere between 0
+and 267 literals with no relation to whether the run finished, while `resamples` sat at 22–56
+every time — on this family the redraws and the probe loop do the work, and the plateau handler
+is there to keep a stall from turning into a bad guess, not to solve the instance.
 
 The summary after every run is meant to be read as a diagnosis.
 
