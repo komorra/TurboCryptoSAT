@@ -254,7 +254,8 @@ void Ui::buildStatus(const UiModel& m, int width) {
 
     std::snprintf(buf, sizeof(buf), "%d", m.threads);
     field("threads", buf);
-    std::snprintf(buf, sizeof(buf), "%.0f %%", m.res.cpuPercent);
+    std::snprintf(buf, sizeof(buf), fmt("%.0f %%  (%.1f of %u cores)", "%.0f %%"),
+                  m.res.cpuPercent, m.res.coresBusy, m.res.cores);
     field("cpu", buf);
     std::string mem = formatBytes(m.res.rssBytes);
     if (roomy && m.res.totalRamBytes) mem += " / " + formatBytes(m.res.totalRamBytes);

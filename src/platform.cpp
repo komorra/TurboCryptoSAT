@@ -214,11 +214,12 @@ ResourceSnapshot ResourceMonitor::sample() {
     }
 #endif
     const uint64_t wall = nowNs();
+    s.cores = cores_;
     if (wall > prevWallNs_ && cpuNs >= prevCpuNs_) {
         const double dt = static_cast<double>(wall - prevWallNs_);
-        s.cpuPercent = 100.0 * static_cast<double>(cpuNs - prevCpuNs_) / dt;
-        const double ceiling = 100.0 * static_cast<double>(cores_);
-        if (s.cpuPercent > ceiling) s.cpuPercent = ceiling;
+        s.coresBusy = static_cast<double>(cpuNs - prevCpuNs_) / dt;
+        if (s.coresBusy > static_cast<double>(cores_)) s.coresBusy = cores_;
+        s.cpuPercent = 100.0 * s.coresBusy / static_cast<double>(cores_);
     }
     prevWallNs_ = wall;
     prevCpuNs_ = cpuNs;

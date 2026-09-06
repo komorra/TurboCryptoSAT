@@ -23,7 +23,12 @@ bool stdoutIsTty();
 bool enableAnsi();
 
 struct ResourceSnapshot {
-    double cpuPercent = 0.0;   // summed over all cores, 100% == one saturated core
+    // Share of the whole machine, the way a task manager reports it: 100% means
+    // every core is saturated. coresBusy is the same figure before it is
+    // normalised, i.e. the number of fully loaded cores the process is worth.
+    double cpuPercent = 0.0;
+    double coresBusy = 0.0;
+    unsigned cores = 1;
     uint64_t rssBytes = 0;
     uint64_t totalRamBytes = 0;
 };

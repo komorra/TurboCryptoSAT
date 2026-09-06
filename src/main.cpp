@@ -1,8 +1,10 @@
 // TurboCryptoSAT - signature based SAT solver for cryptographic instances.
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <filesystem>
 #include <string>
 #include <thread>
@@ -245,25 +247,74 @@ struct RunOutcome {
 };
 
 // Tracks recent progress so the dashboard can show a meaningful rate and ETA.
-class RateTracker {
+// Turns bursty progress into a usable estimate.
+//
+// Signature propagation does not assign variables at a steady pace: one
+// productive probe cascades through hundreds of them at once and is then
+// followed by seconds of nothing, so a rate measured over a few seconds swings
+// by orders of magnitude and the estimate derived from it is unreadable. Two
+// things fix that. The rate is measured over a wide window, and the estimate
+// itself is filtered with a time constant instead of being recomputed from
+// scratch every frame. While progress is stalled the estimate grows with the
+// stall rather than blinking out, which is both steadier and more honest.
+class EtaTracker {
 public:
-    void add(double t, int assigned) {
-        samples_.push_back({t, assigned});
-        while (samples_.size() > 2 && t - samples_.front().t > 8.0) {
-            samples_.erase(samples_.begin());
-        }
-    }
-    double rate() const {
-        if (samples_.size() < 2) return 0.0;
-        const double dt = samples_.back().t - samples_.front().t;
-        const int dv = samples_.back().v - samples_.front().v;
-        if (dt <= 1e-6 || dv <= 0) return 0.0;
-        return dv / dt;
+    void reset() {
+        samples_.clear();
+        rate_ = 0.0;
+        eta_ = -1.0;
+        lastT_ = 0.0;
     }
 
+    void add(double t, int assigned, int total) {
+        if (!samples_.empty() && t <= samples_.back().t) return;
+        samples_.push_back({t, assigned});
+        while (samples_.size() > 2 && t - samples_.front().t > kWindow) {
+            samples_.pop_front();
+        }
+
+        const double span = samples_.back().t - samples_.front().t;
+        const int gained = samples_.back().v - samples_.front().v;
+        rate_ = (span > 1e-6 && gained > 0) ? gained / span : 0.0;
+
+        const double dt = eta_ < 0.0 ? 0.0 : t - lastT_;
+        lastT_ = t;
+
+        const int remaining = total - assigned;
+        if (remaining <= 0) {
+            eta_ = 0.0;
+            return;
+        }
+
+        double raw;
+        if (rate_ > 1e-9) {
+            raw = remaining / rate_;
+        } else if (eta_ >= 0.0) {
+            raw = eta_ + dt;  // stalled: the wait got longer, not unknown
+        } else {
+            return;  // nothing measured yet
+        }
+
+        if (eta_ < 0.0) {
+            eta_ = raw;
+        } else {
+            const double alpha = 1.0 - std::exp(-dt / kTau);
+            eta_ += alpha * (raw - eta_);
+        }
+    }
+
+    double rate() const { return rate_; }
+    double eta() const { return eta_; }
+
 private:
+    static constexpr double kWindow = 30.0;  // seconds of history behind the rate
+    static constexpr double kTau = 10.0;     // smoothing time constant
+
     struct S { double t; int v; };
-    std::vector<S> samples_;
+    std::deque<S> samples_;
+    double rate_ = 0.0;
+    double eta_ = -1.0;
+    double lastT_ = 0.0;
 };
 
 RunOutcome runInstance(const Options& opt, const std::string& path, bool interactive) {
@@ -291,7 +342,7 @@ RunOutcome runInstance(const Options& opt, const std::string& path, bool interac
     if (ui.enabled()) ui.prepare(cnf);
 
     ResourceMonitor rm;
-    RateTracker rate;
+    EtaTracker progress;
     UiModel model;
     model.cnf = &cnf;
     model.prop = &solver.master();
@@ -305,6 +356,7 @@ RunOutcome runInstance(const Options& opt, const std::string& path, bool interac
                                     : static_cast<int>(std::thread::hardware_concurrency());
 
     ResourceSnapshot lastRes;
+    uint32_t lastAttempt = 0;
     uint64_t lastResNs = 0;
     uint64_t lastLogNs = 0;
 
@@ -313,7 +365,13 @@ RunOutcome runInstance(const Options& opt, const std::string& path, bool interac
         const double elapsed = static_cast<double>(now - t0) * 1e-9;
         const SolveStats& st = solver.stats();
         const int assigned = static_cast<int>(solver.master().assignedCount());
-        rate.add(elapsed, assigned);
+        // A restart throws the assignment away, so the history behind the
+        // estimate has to go with it.
+        if (st.attempt != lastAttempt) {
+            lastAttempt = st.attempt;
+            progress.reset();
+        }
+        progress.add(elapsed, assigned, cnf.numVars);
 
         if (now - lastResNs > 400ull * 1000ull * 1000ull) {
             lastRes = rm.sample();
@@ -325,10 +383,8 @@ RunOutcome runInstance(const Options& opt, const std::string& path, bool interac
         model.assignedVars = assigned;
         model.satClauses = solver.master().satisfiedClauses();
         model.elapsed = elapsed;
-        model.varsPerSec = rate.rate();
-        model.eta = model.varsPerSec > 1e-9
-                        ? (cnf.numVars - assigned) / model.varsPerSec
-                        : -1.0;
+        model.varsPerSec = progress.rate();
+        model.eta = progress.eta();
         model.probes = st.probes;
         model.productive = st.productiveProbes;
         model.rejected = st.rejectedResults;
