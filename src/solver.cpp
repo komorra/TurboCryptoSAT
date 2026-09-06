@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstring>
+#include <thread>
 
 #include "platform.h"
 
@@ -103,10 +104,17 @@ void Solver::detectInputs() {
     }
 }
 
-bool Solver::prepareBase(std::string& error) {
+int Solver::workerThreads() const {
+    int n = opt_.threads > 0 ? opt_.threads
+                             : static_cast<int>(std::thread::hardware_concurrency());
+    if (n <= 0) n = 1;
+    return n;
+}
+
+PrepareResult Solver::prepareBase(std::string& error) {
     if (cnf_.hasEmptyClause) {
         error = "the formula contains an empty clause";
-        return false;
+        return PrepareResult::Unsat;
     }
     master_.attach(cnf_);
 
@@ -139,8 +147,9 @@ bool Solver::prepareBase(std::string& error) {
         for (int d : opt_.outputs) {
             const int av = d < 0 ? -d : d;
             if (av < 1 || av > cnf_.numVars) {
-                error = "output literal out of range: " + std::to_string(d);
-                return false;
+                error = "output literal out of range: " + std::to_string(d) +
+                        " (the formula has " + std::to_string(cnf_.numVars) + " variables)";
+                return PrepareResult::InvalidInput;
             }
             targetLits_.push_back(dimacsToLit(d));
         }
@@ -155,20 +164,20 @@ bool Solver::prepareBase(std::string& error) {
     for (Lit l : unitLits_) {
         if (!master_.enqueue(l)) {
             error = "unit clauses contradict each other";
-            return false;
+            return PrepareResult::Unsat;
         }
     }
     for (Lit l : targetLits_) {
         if (!master_.enqueue(l)) {
             error = "the requested output valuation contradicts the formula";
-            return false;
+            return PrepareResult::Unsat;
         }
     }
     if (!master_.propagate()) {
         error = "propagating the unit clauses and the output valuation conflicts";
-        return false;
+        return PrepareResult::Unsat;
     }
-    return true;
+    return PrepareResult::Ok;
 }
 
 void Solver::buildSampleCnf() {
@@ -211,7 +220,7 @@ bool Solver::buildSignatures(std::string& error) {
     SignatureConfig cfg;
     cfg.words = opt_.sigLen;
     cfg.seed = rng_.next();
-    cfg.threads = opt_.threads;
+    cfg.threads = workerThreads();
     cfg.maxRounds = opt_.sampleRounds;
     cfg.gates = &gateNet_;
     cfg.cancelled = [this] {
@@ -743,11 +752,15 @@ bool Solver::attempt(SolveStatus& status) {
                 ++resamplesSinceProgress;
                 ++stats_.resamples;
                 tick("resampling");
-                std::string err;
-                if (buildSignatures(err)) {
-                    for (auto& w : workers_) w->keep.resize(static_cast<size_t>(sig_.words()));
-                    continue;
+                // Not something to shrug off: a failed redraw can leave the
+                // tables sized for a population that was never built, and the
+                // probes would then read past the end of them.
+                if (!buildSignatures(errorMessage_)) {
+                    status = SolveStatus::Error;
+                    return false;
                 }
+                for (auto& w : workers_) w->keep.resize(static_cast<size_t>(sig_.words()));
+                continue;
             }
             bool cdclProgress = false;
             if (!runCdclPhase(status, cdclProgress)) return false;
@@ -769,6 +782,7 @@ SolveResult Solver::solve() {
     SolveResult res;
     startNs_ = nowNs();
     lastTickNs_ = 0;
+    errorMessage_.clear();
 
     if (!opt_.seedGiven) {
         rng_.reseed(nowNs() ^ 0xA5A5A5A5DEADBEEFull);
@@ -781,10 +795,17 @@ SolveResult Solver::solve() {
         if (cnf_.clauseLen(c) == 1) unitLits_.push_back(cnf_.clauseBegin(c)[0]);
     }
 
-    if (!prepareBase(error)) {
-        res.status = SolveStatus::Unsatisfiable;
-        res.message = error;
-        return res;
+    switch (prepareBase(error)) {
+        case PrepareResult::Ok:
+            break;
+        case PrepareResult::Unsat:
+            res.status = SolveStatus::Unsatisfiable;
+            res.message = error;
+            return res;
+        case PrepareResult::InvalidInput:
+            res.status = SolveStatus::Error;
+            res.message = error;
+            return res;
     }
     buildSampleCnf();
     // Reading the gates back is linear in the formula and pays for itself many
@@ -801,10 +822,7 @@ SolveResult Solver::solve() {
         return res;
     }
 
-    int threads = opt_.threads > 0 ? opt_.threads
-                                   : static_cast<int>(std::thread::hardware_concurrency());
-    if (threads <= 0) threads = 1;
-    pool_.reset(new ThreadPool(threads));
+    pool_.reset(new ThreadPool(workerThreads()));
     workers_.clear();
     workers_.reserve(static_cast<size_t>(pool_->size()));
     for (int i = 0; i < pool_->size(); ++i) {
@@ -865,7 +883,7 @@ SolveResult Solver::solve() {
 
         if (attempt(status)) break;
         if (status == SolveStatus::Interrupted || status == SolveStatus::Timeout ||
-            status == SolveStatus::OracleMismatch) {
+            status == SolveStatus::OracleMismatch || status == SolveStatus::Error) {
             break;  // tuning: a contradicted literal ends the trial, not just the attempt
         }
         ++stats_.restarts;
@@ -874,6 +892,7 @@ SolveResult Solver::solve() {
     stats_.solveSeconds = static_cast<double>(nowNs() - solveStart) * 1e-9;
     stats_.assignedVars = master_.assignedCount();
     res.status = status;
+    if (res.message.empty()) res.message = errorMessage_;
     res.stats = stats_;
     if (status == SolveStatus::Solved) {
         res.assignment.assign(master_.values().begin(), master_.values().end());

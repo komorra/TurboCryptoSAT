@@ -144,6 +144,11 @@ honouring that means constraining the samples rather than merely running the cir
 anything without recognisable gate structure — random 3-SAT — where the clauses left over
 disqualify the network immediately.
 
+Either generator can be cut short by `--timeout` or `Ctrl+C`. The lanes finished so far are
+kept and the rest simply come back invalid, so a large `--siglen` cannot hold a run past its
+deadline. An interrupted check is not read as the network failing — only a check that ran to
+the end can retire the fast path.
+
 The summary line reports which of the two ran, and when the network was rejected, by how much:
 
 ```
@@ -281,6 +286,23 @@ The two are what make the method work, so it is worth being precise about them.
 
 `Ctrl+C`, or `ESC` twice within a second. The solver finishes the round in flight, restores
 the terminal and prints what it had.
+
+### Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | solved, and the assignment was re-verified against the formula |
+| `20` | unsatisfiable — proven by propagation, and only ever a statement about the formula |
+| `124` | `--timeout` expired |
+| `130` | interrupted |
+| `10` | anything else, including a malformed input file or an argument that makes no sense |
+
+A bad `--outputs` literal or a truncated DIMACS file is `10`, never `20`: a caller that reads
+an input error as a proof of unsatisfiability would be trusting a result nobody produced.
+
+In benchmark mode `0` means every instance in the directory solved, `2` that some did not, and
+`130` that the run was interrupted — the instances that never ran are reported rather than
+counted as passes.
 
 ### The solution file
 
@@ -519,7 +541,7 @@ the axes barely interact.
 | --- | --- | --- |
 | `--preset <name>` | `quick` (3 axes, one pass), `balanced`, `thorough` | `balanced` |
 | `--tune-timeout <sec>` | Budget for one trial | `30` |
-| `--tune-budget <sec>` | Budget for the whole search | unlimited |
+| `--tune-budget <sec>` | Budget for the whole search, a hard deadline: it also caps each remaining trial | unlimited |
 | `--tune-seeds <n>` | Runs per setting, averaged — results are seed-noisy | `3` |
 
 Output ends with a command line you can paste:

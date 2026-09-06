@@ -39,6 +39,16 @@ enum class SolveStatus {
 
 const char* toString(SolveStatus s);
 
+// What preparing the base assignment concluded. UNSAT and "you passed nonsense"
+// both stop the run, but only one of them is a statement about the formula, and
+// reporting a bad argument as a mathematical result is how an automated caller
+// ends up trusting it.
+enum class PrepareResult {
+    Ok,
+    Unsat,         // the formula plus the requested valuation has no model
+    InvalidInput,  // the request itself does not make sense
+};
+
 struct SolveStats {
     uint64_t probes = 0;
     uint64_t productiveProbes = 0;
@@ -107,8 +117,12 @@ private:
 
     void buildSampleCnf();
     void detectInputs();
-    bool prepareBase(std::string& error);
+    PrepareResult prepareBase(std::string& error);
     bool buildSignatures(std::string& error);
+    // Worker threads to use: --threads, or the hardware count when it is unset.
+    // Both the sample generator and the probe pool ask here, so neither can
+    // silently fall back to one thread.
+    int workerThreads() const;
     bool attempt(SolveStatus& status);
     bool applyLiterals(const std::vector<Lit>& lits, bool& conflict);
     void collectSortedInit();
@@ -157,6 +171,9 @@ private:
 
     const std::vector<int8_t>* oracle_ = nullptr;
     bool oracleTripped_ = false;
+    // Why an attempt gave up with SolveStatus::Error. Set deep in the round
+    // loop, where there is no SolveResult to write to yet.
+    std::string errorMessage_;
 
     SolveStats stats_;
     int effectiveInitk_ = 0;

@@ -1,10 +1,29 @@
 #include "cnf.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace tcs {
+namespace {
+
+// strtol family wrappers that report a range error instead of quietly clamping.
+// Without this a header like "p cnf 100 -1" turns into a size_t of 2^64-1 and
+// the reserve() below takes the process down with an uncaught length_error.
+bool readLong(const char*& p, long long& out) {
+    errno = 0;
+    char* next = nullptr;
+    const long long v = std::strtoll(p, &next, 10);
+    if (next == p) return false;
+    p = next;
+    if (errno == ERANGE) return false;
+    out = v;
+    return true;
+}
+
+}  // namespace
 
 void Cnf::buildOccurrences() {
     const size_t nLits = static_cast<size_t>(numVars) * 2;
@@ -42,7 +61,12 @@ bool loadDimacs(const std::string& path, Cnf& cnf, std::vector<Lit>& unitLits,
     }
     std::vector<char> buf(static_cast<size_t>(size) + 1);
     const size_t got = std::fread(buf.data(), 1, static_cast<size_t>(size), f);
+    const bool readFailed = std::ferror(f) != 0 || got != static_cast<size_t>(size);
     std::fclose(f);
+    if (readFailed) {
+        error = "short read on " + path + "; the file may be truncated";
+        return false;
+    }
     buf[got] = 0;
 
     cnf = Cnf();
@@ -69,8 +93,18 @@ bool loadDimacs(const std::string& path, Cnf& cnf, std::vector<Lit>& unitLits,
             while (p < end && *p != '\n') {
                 if (std::strncmp(p, "cnf", 3) == 0) {
                     p += 3;
-                    declaredVars = static_cast<int>(std::strtol(p, const_cast<char**>(&p), 10));
-                    declaredClauses = static_cast<size_t>(std::strtoll(p, const_cast<char**>(&p), 10));
+                    long long dv = 0, dc = 0;
+                    // The clause count only drives reserve(), so it is enough
+                    // that it cannot exceed what the file could possibly hold:
+                    // the shortest clause anyone can write is "0" plus a
+                    // separator.
+                    if (!readLong(p, dv) || !readLong(p, dc) || dv < 0 || dv > kMaxVar ||
+                        dc < 0 || dc > static_cast<long long>(size)) {
+                        error = "bad problem line in " + path;
+                        return false;
+                    }
+                    declaredVars = static_cast<int>(dv);
+                    declaredClauses = static_cast<size_t>(dc);
                     break;
                 }
                 ++p;
@@ -93,22 +127,32 @@ bool loadDimacs(const std::string& path, Cnf& cnf, std::vector<Lit>& unitLits,
                 while (p < end && *p != '\n') ++p;
                 continue;
             }
-            char* next = nullptr;
-            const long v = std::strtol(p, &next, 10);
-            if (next == p) {
+            long long v = 0;
+            if (!readLong(p, v)) {
                 error = "unexpected character in " + path;
                 return false;
             }
-            p = next;
             if (v == 0) {
                 sawTerminator = true;
                 break;
             }
-            const int av = static_cast<int>(v < 0 ? -v : v);
-            if (av > maxVarSeen) maxVarSeen = av;
+            const long long av = v < 0 ? -v : v;
+            if (av > kMaxVar) {
+                error = "variable number out of range in " + path + ": " + std::to_string(v);
+                return false;
+            }
+            if (static_cast<int>(av) > maxVarSeen) maxVarSeen = static_cast<int>(av);
             clause.push_back(static_cast<int>(v));
         }
-        if (clause.empty() && !sawTerminator) continue;
+        // A clause that simply runs out at the end of the file is not an empty
+        // tail, it is a clause whose remaining literals are missing - and for a
+        // solver, silently treating it as complete means answering a question
+        // the file did not ask.
+        if (!sawTerminator) {
+            if (clause.empty()) continue;
+            error = "clause not terminated by 0 in " + path;
+            return false;
+        }
 
         std::sort(clause.begin(), clause.end(),
                   [](int a, int b) { return (a < 0 ? -a : a) < (b < 0 ? -b : b) || ((a < 0 ? -a : a) == (b < 0 ? -b : b) && a < b); });
@@ -171,7 +215,14 @@ bool writeSolutionCnf(const std::string& path, const std::string& sourceName,
         const int d = (value[static_cast<size_t>(v)] >= 0) ? (v + 1) : -(v + 1);
         std::fprintf(f, "%d 0\n", d);
     }
-    std::fclose(f);
+    // A full disk shows up here, not in any of the fprintf calls above, and
+    // fclose is where the last buffer is actually flushed - so both have to be
+    // asked before the file may be called written.
+    const bool failed = std::ferror(f) != 0;
+    if (std::fclose(f) != 0 || failed) {
+        error = "failed writing " + path + "; the file is incomplete";
+        return false;
+    }
     return true;
 }
 

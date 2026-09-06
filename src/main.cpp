@@ -1,5 +1,7 @@
 // TurboCryptoSAT - signature based SAT solver for cryptographic instances.
 #include <algorithm>
+#include <cerrno>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -87,10 +89,16 @@ void printUsage() {
         kVersion);
 }
 
-bool parseIntArg(const char* s, long long& out) {
+// `lo`/`hi` are inclusive. Every option that ends up in an `int` passes
+// INT_MAX as `hi`: without it the value is truncated on the cast and a typo
+// like --siglen 99999999999 turns into a small or negative table size instead
+// of an error.
+bool parseIntArg(const char* s, long long& out, long long lo, long long hi) {
+    errno = 0;
     char* end = nullptr;
     const long long v = std::strtoll(s, &end, 10);
-    if (!end || *end != 0 || end == s) return false;
+    if (!end || *end != 0 || end == s || errno == ERANGE) return false;
+    if (v < lo || v > hi) return false;
     out = v;
     return true;
 }
@@ -204,31 +212,31 @@ bool parseArgs(int argc, char** argv, Options& opt, int& exitCode) {
             opt.solutionPath = v;
         } else if (a == "--siglen") {
             const char* v = need("--siglen");
-            if (!v || !parseIntArg(v, n) || n < 1) { exitCode = 1; return false; }
+            if (!v || !parseIntArg(v, n, 1, INT_MAX)) { exitCode = 1; return false; }
             opt.sigLen = static_cast<int>(n);
         } else if (a == "--initk") {
             const char* v = need("--initk");
-            if (!v || !parseIntArg(v, n) || n < 0) { exitCode = 1; return false; }
+            if (!v || !parseIntArg(v, n, 0, INT_MAX)) { exitCode = 1; return false; }
             opt.initk = static_cast<int>(n);
         } else if (a == "--mink") {
             const char* v = need("--mink");
-            if (!v || !parseIntArg(v, n) || n < 0) { exitCode = 1; return false; }
+            if (!v || !parseIntArg(v, n, 0, INT_MAX)) { exitCode = 1; return false; }
             opt.mink = static_cast<int>(n);
         } else if (a == "--probe-vars") {
             const char* v = need("--probe-vars");
-            if (!v || !parseIntArg(v, n) || n < 1) { exitCode = 1; return false; }
+            if (!v || !parseIntArg(v, n, 1, 16)) { exitCode = 1; return false; }
             opt.probeVars = static_cast<int>(n);
         } else if (a == "--threads") {
             const char* v = need("--threads");
-            if (!v || !parseIntArg(v, n) || n < 1) { exitCode = 1; return false; }
+            if (!v || !parseIntArg(v, n, 1, 1024)) { exitCode = 1; return false; }
             opt.threads = static_cast<int>(n);
         } else if (a == "--attempts") {
             const char* v = need("--attempts");
-            if (!v || !parseIntArg(v, n) || n < 1) { exitCode = 1; return false; }
+            if (!v || !parseIntArg(v, n, 1, INT_MAX)) { exitCode = 1; return false; }
             opt.attempts = static_cast<int>(n);
         } else if (a == "--stall-limit") {
             const char* v = need("--stall-limit");
-            if (!v || !parseIntArg(v, n) || n < 0) { exitCode = 1; return false; }
+            if (!v || !parseIntArg(v, n, 0, LLONG_MAX)) { exitCode = 1; return false; }
             opt.stallLimit = n;
         } else if (a == "--preset") {
             const char* v = need("--preset");
@@ -244,17 +252,17 @@ bool parseArgs(int argc, char** argv, Options& opt, int& exitCode) {
             opt.tuneBudget = std::atof(v);
         } else if (a == "--tune-seeds") {
             const char* v = need("--tune-seeds");
-            if (!v || !parseIntArg(v, n) || n < 1) { exitCode = 1; return false; }
+            if (!v || !parseIntArg(v, n, 1, INT_MAX)) { exitCode = 1; return false; }
             opt.tuneSeeds = static_cast<int>(n);
         } else if (a == "--cdcl-conflicts") {
             const char* v = need("--cdcl-conflicts");
-            if (!v || !parseIntArg(v, n) || n < 0) { exitCode = 1; return false; }
+            if (!v || !parseIntArg(v, n, 0, LLONG_MAX)) { exitCode = 1; return false; }
             opt.cdclConflicts = static_cast<uint64_t>(n);
         } else if (a == "--no-cdcl") {
             opt.cdcl = false;
         } else if (a == "--sample-rounds") {
             const char* v = need("--sample-rounds");
-            if (!v || !parseIntArg(v, n) || n < 1) { exitCode = 1; return false; }
+            if (!v || !parseIntArg(v, n, 1, INT_MAX)) { exitCode = 1; return false; }
             opt.sampleRounds = static_cast<int>(n);
         } else if (a == "--keep-samples") {
             opt.keepSamples = true;
@@ -264,7 +272,7 @@ bool parseArgs(int argc, char** argv, Options& opt, int& exitCode) {
             opt.timeout = std::atof(v);
         } else if (a == "--seed") {
             const char* v = need("--seed");
-            if (!v || !parseIntArg(v, n)) { exitCode = 1; return false; }
+            if (!v || !parseIntArg(v, n, LLONG_MIN, LLONG_MAX)) { exitCode = 1; return false; }
             opt.seed = static_cast<uint64_t>(n);
             opt.seedGiven = true;
         } else if (a == "--no-ui") {
@@ -588,6 +596,7 @@ int runBenchmark(const Options& opt) {
 
     int solved = 0;
     double totalTime = 0.0;
+    bool interrupted = false;
     for (size_t i = 0; i < files.size(); ++i) {
         const std::string name = fs::path(files[i]).filename().string();
         std::printf("[%2zu/%2zu] %-34s ", i + 1, files.size(), name.c_str());
@@ -613,6 +622,7 @@ int runBenchmark(const Options& opt) {
 
         if (interruptRequested()) {
             std::printf("\ninterrupted\n");
+            interrupted = true;
             break;
         }
     }
@@ -629,8 +639,16 @@ int runBenchmark(const Options& opt) {
                     r.total, static_cast<unsigned long long>(r.probes));
     }
     std::printf("+------------------------------------+---------+---------+------------+-----+----------+----------+------------+\n");
-    std::printf("\nsolved %d / %zu instances in %.2fs\n", solved, rows.size(), totalTime);
-    return solved == static_cast<int>(rows.size()) ? 0 : 2;
+    std::printf("\nsolved %d / %zu instances in %.2fs\n", solved, files.size(), totalTime);
+    if (interrupted) {
+        // Comparing against the rows that did run would call a suite abandoned
+        // after one instance a clean pass, which is exactly the reading an
+        // automated caller takes from exit 0.
+        std::printf("interrupted after %zu of %zu instances; %zu were not run\n", rows.size(),
+                    files.size(), files.size() - rows.size());
+        return 130;
+    }
+    return solved == static_cast<int>(files.size()) ? 0 : 2;
 }
 
 }  // namespace

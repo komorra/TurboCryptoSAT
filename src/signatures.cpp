@@ -1,7 +1,9 @@
 #include "signatures.h"
 
 #include <algorithm>
+#include <atomic>
 #include <new>
+#include <stdexcept>
 #include <thread>
 
 #include "platform.h"
@@ -69,6 +71,16 @@ bool Signatures::generate(const Cnf& cnf, const std::vector<Lit>& fixedLits,
     // redraw and its execution is lane independent, so a population that came
     // out clean vouches for the network itself, not just for those lanes.
     bool verify = !gateVerified_;
+    // Set by any worker that stopped early on the cancel callback.
+    std::atomic<bool> aborted(false);
+
+    // bad_alloc is the ordinary failure; length_error is what an absurd size
+    // raises before the allocator is ever asked, and it has to be caught here
+    // too or a malformed header takes the process down.
+    auto tooBig = [&] {
+        error = "not enough memory for the signature table; lower --siglen";
+        return false;
+    };
 
     auto runPass = [&](bool useGates) {
         try {
@@ -80,8 +92,9 @@ bool Signatures::generate(const Cnf& cnf, const std::vector<Lit>& fixedLits,
             else def_.assign(cells, 0);
             valid_.assign(static_cast<size_t>(words_), 0);
         } catch (const std::bad_alloc&) {
-            error = "not enough memory for the signature table; lower --siglen";
-            return false;
+            return tooBig();
+        } catch (const std::length_error&) {
+            return tooBig();
         }
 
         int threads = std::max(1, cfg.threads);
@@ -97,7 +110,7 @@ bool Signatures::generate(const Cnf& cnf, const std::vector<Lit>& fixedLits,
             const uint64_t seed = cfg.seed ^ (0x9E3779B97F4A7C15ull * static_cast<uint64_t>(t + 1));
             auto run = [&, b, e, seed] {
                 if (useGates) {
-                    gateChunk(cnf, *net, fixedVals, b, e, seed, verify);
+                    gateChunk(cnf, *net, fixedVals, b, e, seed, verify, cfg.cancelled, aborted);
                 } else {
                     generateChunk(cnf, fixedLits, inputVars, cfg.maxRounds, b, e, seed,
                                   cfg.cancelled);
@@ -116,7 +129,9 @@ bool Signatures::generate(const Cnf& cnf, const std::vector<Lit>& fixedLits,
     gateSampling_ = net != nullptr;
     if (!runPass(gateSampling_)) return false;
 
-    if (gateSampling_ && verify) {
+    // An interrupted pass says nothing about the network, so the verdict below
+    // is only reached when the check actually ran to the end.
+    if (gateSampling_ && verify && !aborted.load()) {
         if (validSamples_ == sampleCount()) {
             gateVerified_ = true;
         } else {
@@ -140,7 +155,13 @@ bool Signatures::generate(const Cnf& cnf, const std::vector<Lit>& fixedLits,
     // Transpose the leading lane words. Eight of them are 512 lanes, enough for
     // the prefilter to be exact in practice while costing 8 words per variable.
     probeWords_ = std::min(8, words_);
-    probeT_.assign(static_cast<size_t>(probeWords_) * static_cast<size_t>(numVars_), 0);
+    try {
+        probeT_.assign(static_cast<size_t>(probeWords_) * static_cast<size_t>(numVars_), 0);
+    } catch (const std::bad_alloc&) {
+        return tooBig();
+    } catch (const std::length_error&) {
+        return tooBig();
+    }
     for (int w = 0; w < probeWords_; ++w) {
         uint64_t* col = probeT_.data() + static_cast<size_t>(w) * static_cast<size_t>(numVars_);
         const uint64_t* src = sig_.data() + static_cast<size_t>(w);
@@ -154,7 +175,6 @@ bool Signatures::generate(const Cnf& cnf, const std::vector<Lit>& fixedLits,
     // simply runs without the statistical layer: with no valid lane, every
     // filter comes back empty and each probe falls back to propagation. The
     // summary reports the lane count so the cause is visible.
-    (void)error;
     return true;
 }
 
@@ -172,10 +192,21 @@ void Signatures::disable(int numVars, int words) {
 
 void Signatures::gateChunk(const Cnf& cnf, const GateNetwork& net,
                            const std::vector<int8_t>& fixedVals, int wordBegin, int wordEnd,
-                           uint64_t seed, bool verify) {
+                           uint64_t seed, bool verify,
+                           const std::function<bool()>& cancelled, std::atomic<bool>& aborted) {
     const int words = words_;
     uint64_t* sig = sig_.data();
     Rng rng(seed);
+
+    // Executing the circuit is one straight pass with no natural checkpoint, so
+    // the poll goes on a counter rather than in the inner loop, where the
+    // indirect call through std::function would be most of the cost. The lanes
+    // of an abandoned range are worthless either way, so it drops them.
+    const uint32_t kPollEvery = 4096;
+    auto giveUp = [&] {
+        aborted.store(true);
+        for (int w = wordBegin; w < wordEnd; ++w) valid_[static_cast<size_t>(w)] = 0;
+    };
 
     // The free variables are the whole of the randomness; a fixed one is simply
     // not randomised, which is how a unit clause is honoured here.
@@ -193,7 +224,12 @@ void Signatures::gateChunk(const Cnf& cnf, const GateNetwork& net,
     // One forward pass in topological order. Every lane of every variable is
     // decided by the time the pass ends, no lane can conflict, and nothing is
     // ever revisited - which is the whole difference to propagating clauses.
+    uint32_t poll = 0;
     for (const Gate& g : net.gates) {
+        if (++poll == kPollEvery) {
+            poll = 0;
+            if (cancelled && cancelled()) { giveUp(); return; }
+        }
         const uint64_t* a = sig + static_cast<size_t>(litVar(g.in0)) * static_cast<size_t>(words);
         const uint64_t* b = sig + static_cast<size_t>(litVar(g.in1)) * static_cast<size_t>(words);
         uint64_t* o = sig + static_cast<size_t>(g.out) * static_cast<size_t>(words);
@@ -220,7 +256,12 @@ void Signatures::gateChunk(const Cnf& cnf, const GateNetwork& net,
     const size_t nc = cnf.clauseCount();
     const uint32_t* cstart = cnf.start.data();
     const Lit* clits = cnf.lits.data();
+    poll = 0;
     for (size_t c = 0; c < nc; ++c) {
+        if (++poll == kPollEvery) {
+            poll = 0;
+            if (cancelled && cancelled()) { giveUp(); return; }
+        }
         const uint32_t from = cstart[c];
         const uint32_t len = cstart[c + 1] - from;
         const Lit* b = clits + from;
@@ -263,10 +304,10 @@ void Signatures::generateChunk(const Cnf& cnf, const std::vector<Lit>& fixedLits
     // again: within a round the assigned mask only grows. Retiring those keeps
     // the later sweeps from re-reading the whole formula.
     std::vector<uint8_t> retired(numClauses, 0);
-    uint32_t cursor = 0;
-    bool sweepAgain = false;
-    // Bounds of the dirty region, so a sweep triggered by a single variable
-    // does not walk the whole clause array.
+    // Bounds of the dirty region, so a sweep triggered by a single variable does
+    // not walk the whole clause array. They are also the only record of what is
+    // still queued: a sweep runs the range it captured, and whatever the sweep
+    // itself dirties reopens the range for the next one.
     const uint32_t clauseCount = static_cast<uint32_t>(numClauses);
     uint32_t dirtyLo = clauseCount;
     uint32_t dirtyHi = 0;
@@ -293,8 +334,6 @@ void Signatures::generateChunk(const Cnf& cnf, const std::vector<Lit>& fixedLits
                 dirty[c] = 1;
                 if (c < dirtyLo) dirtyLo = c;
                 if (c > dirtyHi) dirtyHi = c;
-                // Anything at or behind the cursor is only picked up next pass.
-                if (c <= cursor) sweepAgain = true;
             }
         }
     };
@@ -331,13 +370,11 @@ void Signatures::generateChunk(const Cnf& cnf, const std::vector<Lit>& fixedLits
     auto runQueue = [&]() {
       while (dirtyLo <= dirtyHi) {
         if (cancelled && cancelled()) return false;
-        sweepAgain = false;
         const uint32_t lo = dirtyLo;
         const uint32_t hi = dirtyHi;
         dirtyLo = clauseCount;
         dirtyHi = 0;
-        for (cursor = lo; cursor <= hi; ++cursor) {
-            const uint32_t c = cursor;
+        for (uint32_t c = lo; c <= hi; ++c) {
             if (!dirty[c]) continue;
             dirty[c] = 0;
             const uint32_t len = cstart[c + 1] - cstart[c];
@@ -390,12 +427,27 @@ void Signatures::generateChunk(const Cnf& cnf, const std::vector<Lit>& fixedLits
             if (!stillOpen) retired[c] = 1;
             flushDirty();
         }
-        if (!sweepAgain) break;
       }
-      // Everything is clean now; leave the range empty for the next call.
-      dirtyLo = clauseCount;
-      dirtyHi = 0;
+      // The loop only ends with an empty range, and every clause the sweep
+      // dirtied widened that range, so no dirty flag survives here - which
+      // matters, because a clause left flagged would be skipped by
+      // pushClausesOf for the rest of the round. Termination holds because a
+      // clause is only requeued after a variable was newly forced, and the
+      // assigned mask grows monotonically inside a round.
       return true;
+    };
+
+    // A round can only commit lanes that are active and have not conflicted.
+    // Once that set is empty the rest of the round is pure cost: every variable
+    // still to be assigned would be randomised and propagated for a population
+    // that cannot take any of it. On an instance with no driving input set this
+    // is the difference between paying for the whole sweep and paying for the
+    // handful of variables it takes to kill every lane.
+    auto anyLaneAlive = [&]() {
+        for (int i = 0; i < span; ++i) {
+            if (active[static_cast<size_t>(i)] & ~conflict[static_cast<size_t>(i)]) return true;
+        }
+        return false;
     };
 
     for (int round = 0; round < maxRounds; ++round) {
@@ -473,7 +525,16 @@ void Signatures::generateChunk(const Cnf& cnf, const std::vector<Lit>& fixedLits
                 const uint64_t mask = act & ~def[idx];
                 touched |= assignBits(v, w, mask, rng.next());
             }
-            if (touched && !runQueue()) { aborted = true; break; }
+            // Without this the sweep below has an empty queue and the value just
+            // written is never propagated - and, worse, the clauses it falsifies
+            // are never looked at, so the lane commits as valid. On an instance
+            // whose inputs drive everything the loop assigns nothing and this
+            // costs nothing; where it does assign, it is the only thing standing
+            // between a random valuation and the sample population.
+            if (!touched) continue;
+            pushClausesOf(v);
+            if (!runQueue()) { aborted = true; break; }
+            if (!anyLaneAlive()) break;
         }
 
         if (aborted) break;  // the lanes of this round stay invalid

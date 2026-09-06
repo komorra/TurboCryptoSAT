@@ -14,6 +14,12 @@ namespace tcs {
 using Lit = int32_t;
 using Var = int32_t;
 
+// Largest DIMACS variable number the encoding can carry. A literal is
+// 2*(v-1) + sign in an int32_t, and the occurrence index is 2*numVars + 1, so
+// anything at or above 2^30 is signed overflow rather than a large instance.
+// No real formula comes near this; a file that does is malformed.
+constexpr int kMaxVar = 1 << 28;
+
 inline Lit dimacsToLit(int d) {
     return d > 0 ? ((d - 1) << 1) : (((-d) - 1) << 1) | 1;
 }

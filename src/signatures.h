@@ -11,6 +11,7 @@
 // later rounds and, if they keep failing, are excluded through the valid mask.
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -33,8 +34,10 @@ struct SignatureConfig {
     // the solver's default answer to a stall.
     const GateNetwork* gates = nullptr;
 
-    // Polled once per retry round so a timeout or Ctrl+C is not held up by a
-    // long sampling pass. Lanes generated so far are kept.
+    // Polled during sampling - once per retry round while propagating clauses,
+    // and periodically through the gate pass - so a timeout or Ctrl+C is not
+    // held up by a long sampling pass. Lanes generated so far are kept; an
+    // interrupted pass simply yields fewer valid lanes.
     std::function<bool()> cancelled;
 };
 
@@ -82,8 +85,12 @@ private:
     // Executes the recovered circuit over one range of lanes, then clears from
     // the valid mask every lane that fails a clause - the network is only used
     // when it accounts for the whole formula, so this is a check, not a filter.
+    // `aborted` is set when the pass stopped early on `cancelled`. The caller
+    // needs to know: an interrupted verification pass leaves lanes standing that
+    // were never checked, which must not be read as the network failing.
     void gateChunk(const Cnf& cnf, const GateNetwork& net, const std::vector<int8_t>& fixedVals,
-                   int wordBegin, int wordEnd, uint64_t seed, bool verify);
+                   int wordBegin, int wordEnd, uint64_t seed, bool verify,
+                   const std::function<bool()>& cancelled, std::atomic<bool>& aborted);
 
     void generateChunk(const Cnf& cnf, const std::vector<Lit>& fixedLits,
                        const std::vector<Var>& inputVars, int maxRounds,

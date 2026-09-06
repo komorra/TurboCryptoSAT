@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -196,18 +197,33 @@ bool collectTargets(const Options& opt, std::vector<Target>& out, std::string& e
     return true;
 }
 
-Score evaluate(const Options& base, const Params& p, std::vector<Target>& targets, int seeds) {
+// `remaining` reports the seconds left of the whole search, or a negative
+// number when there is no overall budget. Checking it only around evaluate()
+// would not bound anything: one call runs targets * seeds trials, each allowed
+// the full --tune-timeout, so the budget has to reach inside and cap the
+// individual trial as well.
+Score evaluate(const Options& base, const Params& p, std::vector<Target>& targets, int seeds,
+               const std::function<double()>& remaining) {
     Score s;
     Options o = base;
     apply(p, o);
     o.ui = false;
     o.quiet = true;
-    o.timeout = base.tuneTrialTimeout;
     o.seedGiven = true;
 
+    // Leaving early has to fall through to the averaging below, not return on
+    // the spot: the sums are per run, and a Score reported unaveraged reads as
+    // an impossible score - "147.2% of variables" - that also outranks every
+    // honest one.
+    bool stop = false;
     for (Target& t : targets) {
+        if (stop) break;
         for (int k = 0; k < seeds; ++k) {
-            if (interruptRequested()) return s;
+            if (interruptRequested()) { stop = true; break; }
+            const double left = remaining();
+            if (left == 0.0) { stop = true; break; }  // budget spent
+            o.timeout = left > 0.0 ? std::min(base.tuneTrialTimeout, left)
+                                   : base.tuneTrialTimeout;
             o.seed = 0x9E3779B97F4A7C15ull * static_cast<uint64_t>(k + 1) + 12345u;
             Solver solver(t.cnf, o);
             solver.setOracle(&t.oracle);
@@ -313,10 +329,15 @@ int runTune(const Options& opt) {
                 opt.stallLimit < 0 ? 1000 : opt.stallLimit, opt.probeVars, opt.sampleRounds};
 
     const uint64_t start = nowNs();
-    auto outOfBudget = [&] {
-        return opt.tuneBudget > 0.0 &&
-               static_cast<double>(nowNs() - start) * 1e-9 > opt.tuneBudget;
+    // Seconds still available to the whole search: negative when unbounded, and
+    // exactly zero once the budget is gone, which is what stops a trial from
+    // being started at all.
+    auto remaining = [&]() -> double {
+        if (opt.tuneBudget <= 0.0) return -1.0;
+        const double left = opt.tuneBudget - static_cast<double>(nowNs() - start) * 1e-9;
+        return left > 0.0 ? left : 0.0;
     };
+    auto outOfBudget = [&] { return remaining() == 0.0; };
 
     // Every setting the search has already measured. Without this the second
     // pass re-runs the whole first pass verbatim whenever the winner did not
@@ -331,7 +352,7 @@ int runTune(const Options& opt) {
         return std::find(seen.begin(), seen.end(), k) != seen.end();
     };
 
-    Score bestScore = evaluate(opt, best, targets, seeds);
+    Score bestScore = evaluate(opt, best, targets, seeds, remaining);
     seen.push_back(key(best));
     report("baseline", best, bestScore);
     size_t trials = 1;
@@ -358,7 +379,7 @@ int runTune(const Options& opt) {
                     cand.*(a.slotInt) = static_cast<int>(v);
                 }
                 if (known(cand)) continue;
-                const Score s = evaluate(opt, cand, targets, seeds);
+                const Score s = evaluate(opt, cand, targets, seeds, remaining);
                 seen.push_back(key(cand));
                 ++trials;
                 solvedAnywhere += s.solved;
