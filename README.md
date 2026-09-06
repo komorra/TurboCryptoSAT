@@ -100,8 +100,9 @@ attempt halves `initk`, walking from aggressive to conservative.
 The population is the expensive part of a run: it is built before the first probe, again on
 every restart, and again whenever the solver stalls and decides fresh randomness is the
 cheapest way out. Built by unit propagation it means sweeping the whole formula until every
-lane settles — on 17-round SHA-256 (24 765 variables, 82 564 clauses) about **1.2 s** per
-population, which is enough to make redrawing one a decision rather than a reflex.
+lane settles — on 17-round SHA-256 (24 765 variables, 82 564 clauses) about **0.25 s** per
+population across 32 threads, which is enough to make redrawing one a decision rather than a
+reflex.
 
 A Tseitin-encoded circuit does not have to be propagated, though. It can be *run*. So before
 solving, the clauses are matched against the three definition shapes an AND/OR/XOR/NOT encoder
@@ -129,14 +130,14 @@ sample by construction, and the table needs half the memory.
 
 | `24-sha256-r17-c03.cnf`, 32 threads | propagating | executing |
 | --- | --- | --- |
-| first population | 1.2 s | 0.18 s |
-| every redraw after it | 1.2 s | 0.03 s |
+| first population | 0.33 s | 0.08 s |
+| every redraw after it | 0.25 s | 0.04 s |
 | valid lanes | 65 536 | 65 536 |
 
 The fast path is used only when the recovered network accounts for **every** clause, so that
 any valuation of the free variables extends to a satisfying assignment. On top of that, the
 first population it produces is checked clause by clause across all 65 536 lanes — that check
-is the 0.15 s difference between the two rows above, and it only has to run once, since the
+is the difference between the two rows above, and it only has to run once, since the
 gate list is the same on every redraw. If a single lane fails it, the recovered network is not
 the formula after all: the fast path is dropped for the rest of the run and the propagating
 generator takes over. It also steps aside when `--outputs` pins a gate output, because
@@ -397,35 +398,35 @@ suite on a 16-core / 32-thread desktop, default settings, 60 seconds per instanc
 +------------------------------------+---------+---------+------------+-----+----------+----------+------------+
 | instance                           |    vars | clauses | status     | att |  sample  |   total  |     probes |
 +------------------------------------+---------+---------+------------+-----+----------+----------+------------+
-| 01-rand3sat-n060.cnf               |      60 |     252 | SOLVED     |   1 |    0.07s |    0.64s |      96096 |
-| 02-rand3sat-n100.cnf               |     100 |     420 | SOLVED     |   1 |    0.05s |    0.25s |      32032 |
-| 03-rand3sat-n150.cnf               |     150 |     630 | SOLVED     |   1 |    0.05s |    0.25s |      32032 |
-| 04-rand3sat-n220.cnf               |     220 |     924 | SOLVED     |   1 |    0.08s |    0.28s |      32032 |
-| 05-rand3sat-n320.cnf               |     320 |    1360 | SOLVED     |   1 |    0.11s |    0.64s |      64064 |
-| 06-rand3sat-n450.cnf               |     450 |    1912 | SOLVED     |   1 |    0.18s |    0.42s |      32032 |
-| 07-rand3sat-n650.cnf               |     650 |    2769 | TIMEOUT    |   1 |    0.74s |   60.00s |     320320 |
-| 08-rand3sat-n900.cnf               |     900 |    3834 | TIMEOUT    |   1 |    1.21s |   60.00s |     320320 |
-| 09-circuit-i24-g300.cnf            |     322 |     981 | SOLVED     |   1 |    0.00s |    0.78s |      96096 |
-| 10-circuit-i32-g600.cnf            |     625 |    1959 | SOLVED     |   1 |    0.01s |    1.71s |     215360 |
-| 11-circuit-i48-g1200.cnf           |    1242 |    3921 | SOLVED     |   1 |    0.01s |    1.67s |     199552 |
-| 12-circuit-i64-g2000.cnf           |    2059 |    6571 | SOLVED     |   1 |    0.03s |    1.86s |     219008 |
-| 13-circuit-i96-g3500.cnf           |    3594 |   11420 | SOLVED     |   1 |    0.04s |    3.89s |     406432 |
-| 14-circuit-i128-g6000.cnf          |    6125 |   19631 | SOLVED     |   2 |    0.07s |    4.06s |     331584 |
-| 15-xorcircuit-i24-g200.cnf         |     223 |     757 | SOLVED     |   1 |    0.00s |    0.78s |      96128 |
-| 16-xorcircuit-i32-g400.cnf         |     430 |    1502 | SOLVED     |   1 |    0.00s |    0.79s |      96512 |
-| 17-xorcircuit-i48-g800.cnf         |     846 |    3000 | SOLVED     |   1 |    0.01s |    1.09s |     134528 |
-| 18-xorcircuit-i64-g1500.cnf        |    1562 |    5586 | SOLVED     |   1 |    0.03s |    2.69s |     294560 |
-| 19-xorcircuit-i96-g2500.cnf        |    2590 |    9351 | SOLVED     |   1 |    0.03s |   11.80s |     224256 |
-| 20-xorcircuit-i128-g4000.cnf       |    4125 |   14908 | TIMEOUT    |   1 |    0.06s |   60.00s |     391872 |
-| 21-sha256-r08-c03.cnf              |   10490 |   35148 | SOLVED     |   1 |    0.08s |    0.09s |          0 |
-| 22-sha256-r11-c03.cnf              |   15177 |   50723 | SOLVED     |   1 |    0.11s |    0.13s |          0 |
-| 23-sha256-r14-c03.cnf              |   19894 |   66389 | SOLVED     |   1 |    0.15s |    0.17s |          0 |
-| 24-sha256-r17-c03.cnf              |   24765 |   82564 | TIMEOUT    |   1 |    0.33s |   60.01s |     440640 |
-| 25-sha256-r20-c03.cnf              |   29725 |   99060 | TIMEOUT    |   1 |    0.72s |   60.01s |     950400 |
-| 26-sha256-r17-c04.cnf              |   25264 |   84217 | TIMEOUT    |   1 |    0.51s |   60.01s |     615616 |
+| 01-rand3sat-n060.cnf               |      60 |     252 | SOLVED     |   1 |    0.22s |    0.41s |      32032 |
+| 02-rand3sat-n100.cnf               |     100 |     420 | SOLVED     |   1 |    0.05s |    0.26s |      32032 |
+| 03-rand3sat-n150.cnf               |     150 |     630 | SOLVED     |   1 |    0.36s |    0.57s |      32032 |
+| 04-rand3sat-n220.cnf               |     220 |     924 | SOLVED     |   1 |    0.57s |    0.77s |      32032 |
+| 05-rand3sat-n320.cnf               |     320 |    1360 | SOLVED     |   1 |    0.60s |    1.09s |      64064 |
+| 06-rand3sat-n450.cnf               |     450 |    1912 | SOLVED     |   1 |    1.09s |    1.32s |      32032 |
+| 07-rand3sat-n650.cnf               |     650 |    2769 | SOLVED     |   1 |    2.34s |   15.95s |     192192 |
+| 08-rand3sat-n900.cnf               |     900 |    3834 | TIMEOUT    |   1 |    3.97s |   60.00s |     256256 |
+| 09-circuit-i24-g300.cnf            |     322 |     981 | SOLVED     |   1 |    0.00s |    0.79s |      96096 |
+| 10-circuit-i32-g600.cnf            |     625 |    1959 | SOLVED     |   1 |    0.01s |    2.35s |     293152 |
+| 11-circuit-i48-g1200.cnf           |    1242 |    3921 | SOLVED     |   1 |    0.01s |    1.20s |     148384 |
+| 12-circuit-i64-g2000.cnf           |    2059 |    6571 | SOLVED     |   1 |    0.02s |    1.76s |     208480 |
+| 13-circuit-i96-g3500.cnf           |    3594 |   11420 | SOLVED     |   1 |    0.02s |    3.33s |     348736 |
+| 14-circuit-i128-g6000.cnf          |    6125 |   19631 | SOLVED     |   2 |    0.06s |    4.65s |     446368 |
+| 15-xorcircuit-i24-g200.cnf         |     223 |     757 | SOLVED     |   1 |    0.00s |    0.78s |      96160 |
+| 16-xorcircuit-i32-g400.cnf         |     430 |    1502 | SOLVED     |   1 |    0.01s |    1.05s |     131552 |
+| 17-xorcircuit-i48-g800.cnf         |     846 |    3000 | SOLVED     |   1 |    0.01s |    0.75s |      96704 |
+| 18-xorcircuit-i64-g1500.cnf        |    1562 |    5586 | SOLVED     |   1 |    0.01s |    1.55s |     176736 |
+| 19-xorcircuit-i96-g2500.cnf        |    2590 |    9351 | SOLVED     |   1 |    0.02s |    2.34s |     175904 |
+| 20-xorcircuit-i128-g4000.cnf       |    4125 |   14908 | TIMEOUT    |   1 |    0.05s |   60.00s |     535936 |
+| 21-sha256-r08-c03.cnf              |   10490 |   35148 | SOLVED     |   1 |    0.02s |    0.04s |          0 |
+| 22-sha256-r11-c03.cnf              |   15177 |   50723 | SOLVED     |   1 |    0.03s |    0.05s |          0 |
+| 23-sha256-r14-c03.cnf              |   19894 |   66389 | SOLVED     |   1 |    0.05s |    0.07s |          0 |
+| 24-sha256-r17-c03.cnf              |   24765 |   82564 | TIMEOUT    |   1 |    0.43s |   60.01s |     935424 |
+| 25-sha256-r20-c03.cnf              |   29725 |   99060 | TIMEOUT    |   1 |    0.74s |   60.01s |    1014080 |
+| 26-sha256-r17-c04.cnf              |   25264 |   84217 | TIMEOUT    |   1 |    0.43s |   60.01s |     763552 |
 +------------------------------------+---------+---------+------------+-----+----------+----------+------------+
 
-solved 20 / 26 instances in 394.02s
+solved 21 / 26 instances in 341.11s
 ```
 
 Read across the families rather than down the rows. The circuits it was built for fall in
@@ -438,16 +439,20 @@ leave the probes with nothing to intersect — the first because parity structur
 unit propagation, the second because there is no driving input set and the population carries no
 signal at all — and both used to end in `TIMEOUT` or `EXHAUSTED` from 48 inputs and n = 150
 upwards, after a guess that was close to a coin flip. Under the CDCL phase `03`–`06` finish in
-under a second each and `17`–`19` in under twelve; `07`, `08` and `20` still do not. Read those
-rows honestly: they are not evidence for the signature idea, they are evidence that what happens
-when it runs out is no longer a gamble. The suite as a whole went from 13 solved in 709 s to 20
-in 394 s, and every gain is in those two families.
+a second or two each and `17`–`19` in under three; `07` lands either side of the limit depending
+on the seed, and `08` and `20` still do not. Read those rows honestly: they are not evidence for
+the signature idea, they are evidence that what happens when it runs out is no longer a gamble.
+The suite as a whole went from 13 solved in 709 s to 21 in 341 s, and every gain is in those two
+families.
 
 Note the `sample` column on the circuit and SHA-256 rows: those populations are executed rather
 than propagated, so building them is no longer a visible share of a run - the seconds against
 17 and 20 rounds are the probe loop failing to find agreement, not the sampler. The random
 3-SAT rows are the ones that still pay for propagated populations, and there the number counts
-every redraw a stalling run asked for.
+every redraw a stalling run asked for. It grows with `n` because a formula with no driving input
+set leaves the generator filling in every variable one at a time, propagating after each - which
+is what makes the lanes it keeps genuine samples, and on these instances what makes it discover
+that almost none of them are.
 
 ### Tests
 
