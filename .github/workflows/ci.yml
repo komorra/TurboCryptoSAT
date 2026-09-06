@@ -42,7 +42,8 @@ jobs:
 
       - name: Version
         shell: bash
-        run: "$TCS_BIN" --version
+        run: |
+          "$TCS_BIN" --version
 
       # The suite is generated from fixed seeds, so a differing file count here
       # would mean the generator stopped being deterministic.
@@ -72,4 +73,5 @@ jobs:
       # statistical and the harder families are expected to time out.
       - name: Short benchmark
         shell: bash
-        run: "$TCS_BIN" benchmark benchmark --no-ui --siglen 256 --timeout 20 || true
+        run: |
+          "$TCS_BIN" benchmark benchmark --no-ui --siglen 256 --timeout 20 || true

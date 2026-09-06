@@ -11,7 +11,7 @@ and reads off the implications that unit propagation cannot see.
 [![license](https://img.shields.io/github/license/komorra/TurboCryptoSAT)](LICENSE)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white)](CMakeLists.txt)
 [![platforms](https://img.shields.io/badge/platforms-Windows%20x64%20%7C%20Linux-informational)](#building)
-[![stars](https://img.shields.io/github/stars/komorra/TurboCryptoSAT?style=flat)](https://github.com/komorra/TurboCryptoSAT/stargazers)
+[![stars](https://img.shields.io/github/stars/komorra/TurboCryptoSAT?style=flat&label=stars)](https://github.com/komorra/TurboCryptoSAT/stargazers)
 [![last commit](https://img.shields.io/github/last-commit/komorra/TurboCryptoSAT)](https://github.com/komorra/TurboCryptoSAT/commits/main)
 
 </div>
@@ -442,6 +442,30 @@ ctest --test-dir build          # smoke tests
 ```
 
 ## Tuning
+
+`--initk` and `--mink` together decide whether the statistical layer says anything at all, and
+the defaults are not the right pair for every encoding. A worked example, a 17-round SHA-256
+preimage with a 3-byte message:
+
+```
+turbocryptosat sha256-r17-c03.cnf --initk 6 --mink 10
+  -> SOLVED (verified) in 117s, first attempt
+     probes 1520224 (productive 139), resamples 30
+     cdcl 6 phases, 204056 conflicts, 1 literal proved
+```
+
+Two things are worth reading off that. `--initk 6` leaves roughly four times as many samples
+under the filter as the default 8, and `--mink 10` lets a verdict stand on far fewer surviving
+words; below that pair the filter finds constants, above it the intersection comes back empty
+round after round. And the CDCL phase proved *one* literal in 204 000 conflicts — the run was
+carried by the probe loop and by 30 cheap redraws of the population, which is what the plateau
+handler is supposed to look like on an instance the sample layer suits.
+
+The same pair makes no measurable difference on the shipped suite (20 of 26 either way), so it
+is a knob to reach for per encoding rather than a better default. Instances differ more than the
+round count suggests: the SHA-256 instance above leaves 13 978 variables that no recovered gate
+defines, while `24-sha256-r17-c03.cnf` in this repository leaves 24, and that one is out of
+reach at any setting tried so far.
 
 The summary after every run is meant to be read as a diagnosis.
 
