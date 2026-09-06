@@ -59,8 +59,8 @@ attempt halves `initk`, walking from aggressive to conservative.
    instance.cnf   +----------------------------------------------+
    ------------>  |  recover the gates from the clauses          |
                   |  + random values for the free inputs         |
-                  |  + one bit-parallel pass in topological order |
-                  |  = signature table: one 65536-bit vector      |
+                  |  + one bit-parallel pass, topological order  |
+                  |  = signature table: one 65536-bit vector     |
                   |    per variable, sampling the circuit        |
                   +-----------------------+----------------------+
                                           |
@@ -83,7 +83,7 @@ attempt halves `initk`, walking from aggressive to conservative.
 The population is the expensive part of a run: it is built before the first probe, again on
 every restart, and again whenever the solver stalls and decides fresh randomness is a better
 answer than a guess. Built by unit propagation it means sweeping the whole formula until every
-lane settles — on 17-round SHA-256 (24 765 variables, 82 564 clauses) about **1.3 s** per
+lane settles — on 17-round SHA-256 (24 765 variables, 82 564 clauses) about **1.2 s** per
 population, which is enough to make redrawing one a decision rather than a reflex.
 
 A Tseitin-encoded circuit does not have to be propagated, though. It can be *run*. So before
@@ -106,8 +106,8 @@ sample by construction, and the table needs half the memory.
 
 | `24-sha256-r17-c03.cnf`, 32 threads | propagating | executing |
 | --- | --- | --- |
-| first population | 1.3 s | 0.18 s |
-| every redraw after it | 1.3 s | 0.03 s |
+| first population | 1.2 s | 0.18 s |
+| every redraw after it | 1.2 s | 0.03 s |
 | valid lanes | 65 536 | 65 536 |
 
 The fast path is used only when the recovered network accounts for **every** clause, so that
@@ -312,35 +312,35 @@ suite on a 16-core / 32-thread desktop, default settings, 60 seconds per instanc
 +------------------------------------+---------+---------+------------+-----+----------+----------+------------+
 | instance                           |    vars | clauses | status     | att |  sample  |   total  |     probes |
 +------------------------------------+---------+---------+------------+-----+----------+----------+------------+
-| 01-rand3sat-n060.cnf               |      60 |     252 | SOLVED     |   2 |    0.18s |    4.13s |     609056 |
-| 02-rand3sat-n100.cnf               |     100 |     420 | SOLVED     |   2 |    0.81s |   12.45s |    1570752 |
-| 03-rand3sat-n150.cnf               |     150 |     630 | EXHAUSTED  |   5 |    1.25s |   18.91s |    2404768 |
-| 04-rand3sat-n220.cnf               |     220 |     924 | EXHAUSTED  |   5 |    2.12s |   25.19s |    3110496 |
-| 05-rand3sat-n320.cnf               |     320 |    1360 | EXHAUSTED  |   5 |    3.42s |   36.55s |    4488992 |
-| 06-rand3sat-n450.cnf               |     450 |    1912 | TIMEOUT    |   5 |    5.96s |   60.00s |    7218176 |
-| 07-rand3sat-n650.cnf               |     650 |    2769 | TIMEOUT    |   4 |    7.01s |   60.00s |    7040800 |
-| 08-rand3sat-n900.cnf               |     900 |    3834 | TIMEOUT    |   3 |    5.36s |   60.00s |    7192800 |
-| 09-circuit-i24-g300.cnf            |     322 |     981 | SOLVED     |   1 |    0.32s |    9.59s |    1169376 |
-| 10-circuit-i32-g600.cnf            |     625 |    1959 | SOLVED     |   1 |    0.08s |    1.37s |     162496 |
-| 11-circuit-i48-g1200.cnf           |    1242 |    3921 | SOLVED     |   1 |    0.17s |    2.75s |     318080 |
-| 12-circuit-i64-g2000.cnf           |    2059 |    6571 | SOLVED     |   2 |    1.85s |   14.36s |    1463712 |
-| 13-circuit-i96-g3500.cnf           |    3594 |   11420 | SOLVED     |   1 |    0.52s |    4.70s |     505568 |
-| 14-circuit-i128-g6000.cnf          |    6125 |   19631 | SOLVED     |   2 |    1.11s |    7.68s |     738656 |
-| 15-xorcircuit-i24-g200.cnf         |     223 |     757 | SOLVED     |   1 |    0.06s |    2.05s |     256320 |
-| 16-xorcircuit-i32-g400.cnf         |     430 |    1502 | SOLVED     |   1 |    0.07s |    1.30s |     160832 |
-| 17-xorcircuit-i48-g800.cnf         |     846 |    3000 | TIMEOUT    |   3 |    1.54s |   60.00s |    7450912 |
-| 18-xorcircuit-i64-g1500.cnf        |    1562 |    5586 | TIMEOUT    |   2 |    4.25s |   60.00s |    6144128 |
-| 19-xorcircuit-i96-g2500.cnf        |    2590 |    9351 | TIMEOUT    |   1 |    2.78s |   60.00s |    5594560 |
-| 20-xorcircuit-i128-g4000.cnf       |    4125 |   14908 | TIMEOUT    |   1 |    8.19s |   60.00s |    4021760 |
-| 21-sha256-r08-c03.cnf              |   10490 |   35148 | SOLVED     |   1 |    0.50s |    0.51s |          0 |
-| 22-sha256-r11-c03.cnf              |   15177 |   50723 | SOLVED     |   1 |    0.73s |    0.75s |          0 |
-| 23-sha256-r14-c03.cnf              |   19894 |   66389 | SOLVED     |   1 |    0.96s |    0.98s |          0 |
-| 24-sha256-r17-c03.cnf              |   24765 |   82564 | TIMEOUT    |   1 |    9.46s |   60.01s |    1301856 |
-| 25-sha256-r20-c03.cnf              |   29725 |   99060 | TIMEOUT    |   1 |    8.66s |   60.01s |    1121760 |
-| 26-sha256-r17-c04.cnf              |   25264 |   84217 | TIMEOUT    |   1 |    9.76s |   60.01s |    1297440 |
+| 01-rand3sat-n060.cnf               |      60 |     252 | SOLVED     |   1 |    0.16s |    3.99s |     608992 |
+| 02-rand3sat-n100.cnf               |     100 |     420 | SOLVED     |   1 |    0.32s |    6.39s |     961472 |
+| 03-rand3sat-n150.cnf               |     150 |     630 | EXHAUSTED  |   5 |    1.44s |   18.26s |    2563712 |
+| 04-rand3sat-n220.cnf               |     220 |     924 | EXHAUSTED  |   5 |    3.01s |   30.16s |    3785152 |
+| 05-rand3sat-n320.cnf               |     320 |    1360 | EXHAUSTED  |   5 |    4.14s |   35.10s |    4938176 |
+| 06-rand3sat-n450.cnf               |     450 |    1912 | EXHAUSTED  |   5 |    5.40s |   47.58s |    6798752 |
+| 07-rand3sat-n650.cnf               |     650 |    2769 | TIMEOUT    |   5 |    8.88s |   60.00s |    8315648 |
+| 08-rand3sat-n900.cnf               |     900 |    3834 | TIMEOUT    |   3 |    6.21s |   60.00s |    7440096 |
+| 09-circuit-i24-g300.cnf            |     322 |     981 | SOLVED     |   1 |    0.01s |    7.44s |     952800 |
+| 10-circuit-i32-g600.cnf            |     625 |    1959 | SOLVED     |   1 |    0.01s |    1.18s |     187168 |
+| 11-circuit-i48-g1200.cnf           |    1242 |    3921 | SOLVED     |   1 |    0.02s |    2.63s |     423104 |
+| 12-circuit-i64-g2000.cnf           |    2059 |    6571 | SOLVED     |   1 |    0.03s |    3.41s |     548544 |
+| 13-circuit-i96-g3500.cnf           |    3594 |   11420 | SOLVED     |   1 |    0.07s |    4.57s |     707520 |
+| 14-circuit-i128-g6000.cnf          |    6125 |   19631 | SOLVED     |   2 |    0.11s |    5.17s |     753984 |
+| 15-xorcircuit-i24-g200.cnf         |     223 |     757 | SOLVED     |   1 |    0.00s |    1.44s |     224256 |
+| 16-xorcircuit-i32-g400.cnf         |     430 |    1502 | SOLVED     |   1 |    0.00s |    1.14s |     160544 |
+| 17-xorcircuit-i48-g800.cnf         |     846 |    3000 | TIMEOUT    |   4 |    0.06s |   60.00s |    9033184 |
+| 18-xorcircuit-i64-g1500.cnf        |    1562 |    5586 | TIMEOUT    |   2 |    0.18s |   60.00s |    8010336 |
+| 19-xorcircuit-i96-g2500.cnf        |    2590 |    9351 | TIMEOUT    |   1 |    0.10s |   60.00s |    6178208 |
+| 20-xorcircuit-i128-g4000.cnf       |    4125 |   14908 | TIMEOUT    |   1 |    0.35s |   60.00s |    4808704 |
+| 21-sha256-r08-c03.cnf              |   10490 |   35148 | SOLVED     |   1 |    0.09s |    0.11s |          0 |
+| 22-sha256-r11-c03.cnf              |   15177 |   50723 | SOLVED     |   1 |    0.13s |    0.16s |          0 |
+| 23-sha256-r14-c03.cnf              |   19894 |   66389 | SOLVED     |   1 |    0.22s |    0.25s |          0 |
+| 24-sha256-r17-c03.cnf              |   24765 |   82564 | TIMEOUT    |   1 |    1.35s |   60.01s |    1766976 |
+| 25-sha256-r20-c03.cnf              |   29725 |   99060 | TIMEOUT    |   1 |    1.33s |   60.01s |    1444096 |
+| 26-sha256-r17-c04.cnf              |   25264 |   84217 | TIMEOUT    |   1 |    1.07s |   60.01s |    1675200 |
 +------------------------------------+---------+---------+------------+-----+----------+----------+------------+
 
-solved 13 / 26 instances in 743.30s
+solved 13 / 26 instances in 709.00s
 ```
 
 Read across the families rather than down the rows. The circuits it was built for fall in
@@ -350,6 +350,12 @@ rounds are past what it reaches in a minute; it gets roughly a third of the way 
 The XOR-heavy circuits split sharply: small ones fall, and from 48 inputs up the parity
 structure leaves both propagation and the samples with nothing to intersect. Random 3-SAT is
 the acknowledged worst case and behaves like it.
+
+Note the `sample` column on the circuit and SHA-256 rows: those populations are executed rather
+than propagated, so building them is no longer a visible share of a run - the seconds against
+17 and 20 rounds are the probe loop failing to find agreement, not the sampler. The random
+3-SAT rows are the ones that still pay for propagated populations, and there the number counts
+every redraw a stalling run asked for.
 
 ### Tests
 
