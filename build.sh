@@ -14,6 +14,6 @@ echo "cmake not found, compiling directly with ${CXX:-c++}"
 mkdir -p build
 "${CXX:-c++}" -std=c++17 -O2 -Wall -Wextra -pthread \
     src/main.cpp src/cdcl.cpp src/cnf.cpp src/gates.cpp src/genbench.cpp src/platform.cpp \
-    src/propagator.cpp src/signatures.cpp src/solver.cpp src/ui.cpp \
+    src/propagator.cpp src/signatures.cpp src/solver.cpp src/tune.cpp src/ui.cpp \
     -o build/turbocryptosat
 echo "built: build/turbocryptosat"

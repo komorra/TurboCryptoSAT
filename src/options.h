@@ -44,6 +44,15 @@ struct Options {
     // budget is per phase and doubles whenever a phase proves nothing.
     bool cdcl = true;
     uint64_t cdclConflicts = 10000;  // 0 -> bounded only by --timeout
+
+    // Tuning mode: search for the parameters that suit an instance family,
+    // validated against a known solution. See tune.h.
+    std::string tunePath;             // instance, or a directory of them
+    std::string tuneSolution;         // explicit solution file for a single instance
+    std::string tunePreset = "balanced";
+    double tuneTrialTimeout = 30.0;   // seconds allowed per trial
+    double tuneBudget = 0.0;          // seconds for the whole search, 0 = unlimited
+    int tuneSeeds = 3;                // runs per setting; results are seed-noisy
 };
 
 }  // namespace tcs

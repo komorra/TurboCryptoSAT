@@ -15,6 +15,7 @@
 #include "options.h"
 #include "platform.h"
 #include "solver.h"
+#include "tune.h"
 #include "ui.h"
 
 namespace fs = std::filesystem;
@@ -31,6 +32,8 @@ void printUsage() {
         "USAGE\n"
         "  turbocryptosat <instance.cnf> [options]\n"
         "  turbocryptosat benchmark <directory> [options]\n"
+        "  turbocryptosat tune <instance.cnf> [solution.cnf] [options]\n"
+        "  turbocryptosat tune <directory> [options]\n"
         "  turbocryptosat gen-benchmark <directory>\n"
         "\n"
         "INSTANCE OPTIONS\n"
@@ -64,6 +67,13 @@ void printUsage() {
         "  --keep-samples        Reuse the sample population across restarts.\n"
         "  --timeout <sec>       Abort after the given number of seconds.\n"
         "  --seed <n>            Fix the random seed for reproducible runs.\n"
+        "\n"
+        "TUNING OPTIONS (tune mode)\n"
+        "  --preset <name>       quick, balanced or thorough. Default balanced.\n"
+        "  --tune-timeout <sec>  Budget for one trial. Default 30.\n"
+        "  --tune-budget <sec>   Budget for the whole search. Default unlimited.\n"
+        "  --tune-seeds <n>      Runs per setting; results are seed-noisy.\n"
+        "                        Default 3.\n"
         "\n"
         "OUTPUT OPTIONS\n"
         "  --no-ui               Plain log output instead of the dashboard.\n"
@@ -123,6 +133,19 @@ bool parseArgs(int argc, char** argv, Options& opt, int& exitCode) {
         }
         opt.benchmarkDir = argv[2];
         i = 3;
+    } else if (std::strcmp(argv[1], "tune") == 0) {
+        if (argc < 3) {
+            std::fprintf(stderr, "tune mode needs an instance or a directory\n");
+            exitCode = 1;
+            return false;
+        }
+        opt.tunePath = argv[2];
+        i = 3;
+        // A bare second path is the solution; anything starting with - is a flag.
+        if (argc > 3 && argv[3][0] != '-') {
+            opt.tuneSolution = argv[3];
+            i = 4;
+        }
     } else {
         opt.cnfPath = argv[1];
         i = 2;
@@ -207,6 +230,22 @@ bool parseArgs(int argc, char** argv, Options& opt, int& exitCode) {
             const char* v = need("--stall-limit");
             if (!v || !parseIntArg(v, n) || n < 0) { exitCode = 1; return false; }
             opt.stallLimit = n;
+        } else if (a == "--preset") {
+            const char* v = need("--preset");
+            if (!v) return false;
+            opt.tunePreset = v;
+        } else if (a == "--tune-timeout") {
+            const char* v = need("--tune-timeout");
+            if (!v) return false;
+            opt.tuneTrialTimeout = std::atof(v);
+        } else if (a == "--tune-budget") {
+            const char* v = need("--tune-budget");
+            if (!v) return false;
+            opt.tuneBudget = std::atof(v);
+        } else if (a == "--tune-seeds") {
+            const char* v = need("--tune-seeds");
+            if (!v || !parseIntArg(v, n) || n < 1) { exitCode = 1; return false; }
+            opt.tuneSeeds = static_cast<int>(n);
         } else if (a == "--cdcl-conflicts") {
             const char* v = need("--cdcl-conflicts");
             if (!v || !parseIntArg(v, n) || n < 0) { exitCode = 1; return false; }
@@ -618,7 +657,9 @@ int main(int argc, char** argv) {
     installInterruptHandlers();
 
     int rc = 0;
-    if (!opt.benchmarkDir.empty()) {
+    if (!opt.tunePath.empty()) {
+        rc = runTune(opt);
+    } else if (!opt.benchmarkDir.empty()) {
         rc = runBenchmark(opt);
     } else {
         if (opt.verbose) {

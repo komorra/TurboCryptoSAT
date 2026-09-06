@@ -19,6 +19,7 @@ add_executable(turbocryptosat
     src/propagator.cpp
     src/signatures.cpp
     src/solver.cpp
+    src/tune.cpp
     src/ui.cpp
 )
 

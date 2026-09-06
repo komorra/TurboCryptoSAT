@@ -33,6 +33,7 @@ enum class SolveStatus {
     Exhausted,       // every attempt ran into a conflict
     Interrupted,
     Timeout,
+    OracleMismatch,  // tuning only: an assignment contradicted the known solution
     Error,
 };
 
@@ -57,6 +58,8 @@ struct SolveStats {
     uint64_t totalSamples = 0;
     uint64_t signatureBytes = 0;
     uint64_t unusedVars = 0;     // variables no clause mentions
+    int oracleVar = -1;          // 0-based variable that contradicted the oracle
+    uint64_t assignedVars = 0;   // variables assigned when the run stopped
     uint64_t gates = 0;          // gates recovered from the clauses
     uint64_t unexplained = 0;    // clauses no recovered gate accounts for
     bool gateSampling = false;   // samples produced by executing them
@@ -79,6 +82,18 @@ public:
     void setProgressCallback(ProgressFn fn) { progress_ = std::move(fn); }
 
     SolveResult solve();
+
+    // Tuning support. `oracle` holds one entry per variable, 1 or -1 for a known
+    // solution and 0 for "no opinion"; it must outlive the solver. With one set,
+    // the first literal committed against it ends the run as OracleMismatch
+    // instead of letting it wander on toward a timeout - which is what makes a
+    // parameter sweep cheap, since a bad setting is refuted in a fraction of a
+    // second rather than burning the whole per-trial budget.
+    //
+    // It is a check, never a hint: nothing in the search reads it to decide
+    // anything, so a tuned parameter set means the same thing on an instance
+    // whose solution nobody has.
+    void setOracle(const std::vector<int8_t>* oracle) { oracle_ = oracle; }
 
     // Live view used by the UI.
     const Propagator& master() const { return master_; }
@@ -105,6 +120,8 @@ private:
     // false only when the attempt is over (refuted, interrupted, out of time).
     bool runCdclPhase(SolveStatus& status, bool& progress);
     bool verify() const;
+    // Scans master_'s trail from `from` for a literal the oracle contradicts.
+    bool oracleBroken(size_t from);
     void tick(const char* phase);
 
     const Cnf& cnf_;
@@ -137,6 +154,9 @@ private:
 
     std::unique_ptr<ThreadPool> pool_;
     std::vector<std::unique_ptr<Worker>> workers_;
+
+    const std::vector<int8_t>* oracle_ = nullptr;
+    bool oracleTripped_ = false;
 
     SolveStats stats_;
     int effectiveInitk_ = 0;

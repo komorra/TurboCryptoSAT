@@ -483,6 +483,56 @@ and 267 literals with no relation to whether the run finished, while `resamples`
 every time — on this family the redraws and the probe loop do the work, and the plateau handler
 is there to keep a stall from turning into a bad guess, not to solve the instance.
 
+### Tuning it automatically
+
+Doing that sweep by hand is what `tune` mode is for. Give it an instance and a solution and it
+searches for the settings that suit the family:
+
+```bash
+turbocryptosat tune instance.cnf                      # uses instance.solution.cnf
+turbocryptosat tune instance.cnf solution.cnf         # or an explicit one
+turbocryptosat tune benchmark/ --preset thorough      # every instance that has a solution
+```
+
+The solution is what makes the search affordable. The solver assigns in place and never
+backtracks, so a setting that commits a wrong literal does not announce itself — the run just
+wanders off and burns the whole budget before reporting a timeout. With the solution to check
+against, the first literal committed against it ends the trial instead, usually in well under a
+second, so ruling a bad setting out is nearly free. It is only ever a check: nothing in the
+search reads it to decide anything, which is what makes the resulting parameters mean something
+on an instance nobody has solved yet.
+
+Settings are ranked exactly as you would want: more variables correctly assigned wins, and among
+settings that finish the instance outright, the faster one wins. Time is deliberately not a
+tie-break between partial results — rewarding a trial that reached 40 % and died after two
+seconds over one still going at the timeout would select for settings that fail fast.
+
+The search is coordinate descent over `initk`, `mink`, `siglen`, `stall-limit`, `probe-vars` and
+`sample-rounds`, in that order, one axis at a time against the best found so far. A full grid
+would be thousands of trials; this is a few dozen, and once `initk` and `mink` are in their band
+the axes barely interact.
+
+| Option | Meaning | Default |
+| --- | --- | --- |
+| `--preset <name>` | `quick` (3 axes, one pass), `balanced`, `thorough` | `balanced` |
+| `--tune-timeout <sec>` | Budget for one trial | `30` |
+| `--tune-budget <sec>` | Budget for the whole search | unlimited |
+| `--tune-seeds <n>` | Runs per setting, averaged — results are seed-noisy | `3` |
+
+Output ends with a command line you can paste:
+
+```
+  best         --siglen 1024 --initk 6 --mink 32 --stall-limit 1000 --probe-vars 1 --sample-rounds 12
+  result       SOLVED on every run (2/2), 0.56s average
+```
+
+**One caveat worth knowing.** The check is "did this run reproduce *that* solution", not "is this
+run heading somewhere satisfiable". On an instance with more than one solution — circuit
+inversion where the output layer has several preimages, for instance — a trial that is quietly
+finding a different valid answer is scored as wrong. Watch the `wrong` column: if it is high
+across every setting, the instance likely has many solutions and the ranking is measuring
+agreement with one of them rather than difficulty.
+
 The summary after every run is meant to be read as a diagnosis.
 
 | Symptom | What it means | Knob |

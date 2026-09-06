@@ -15,6 +15,7 @@ const char* toString(SolveStatus s) {
         case SolveStatus::Exhausted: return "EXHAUSTED";
         case SolveStatus::Interrupted: return "INTERRUPTED";
         case SolveStatus::Timeout: return "TIMEOUT";
+        case SolveStatus::OracleMismatch: return "WRONG";
         case SolveStatus::Error: return "ERROR";
     }
     return "?";
@@ -120,7 +121,14 @@ bool Solver::prepareBase(std::string& error) {
     for (Var v = 0; v < cnf_.numVars; ++v) {
         const size_t p = static_cast<size_t>(v) * 2u;
         if (cnf_.occStart[p] == cnf_.occStart[p + 2]) {
-            master_.enqueue(mkLit(v, false));
+            // Any value works, but under a tuning oracle it has to be *that*
+            // value: pinning the opposite would abort the trial on the spot for
+            // a variable no clause even mentions.
+            bool negate = false;
+            if (oracle_ && static_cast<size_t>(v) < oracle_->size()) {
+                negate = (*oracle_)[static_cast<size_t>(v)] < 0;
+            }
+            master_.enqueue(mkLit(v, negate));
             ++stats_.unusedVars;
         }
     }
@@ -569,6 +577,13 @@ bool Solver::runCdclPhase(SolveStatus& status, bool& progress) {
                 status = SolveStatus::Exhausted;
                 return false;
             }
+            if (oracleBroken(0)) {
+                // A different satisfying assignment, not a wrong one - but the
+                // tuning run is measuring progress towards *this* solution, so
+                // it stops here either way.
+                status = SolveStatus::OracleMismatch;
+                return false;
+            }
             progress = true;
             return true;
         }
@@ -599,7 +614,29 @@ bool Solver::applyLiterals(const std::vector<Lit>& lits, bool& conflict) {
         conflict = true;
         return false;
     }
+    if (oracleBroken(m)) {
+        oracleTripped_ = true;
+        return false;
+    }
     return master_.mark() > m;
+}
+
+bool Solver::oracleBroken(size_t from) {
+    if (!oracle_) return false;
+    const std::vector<Lit>& tr = master_.trail();
+    const std::vector<int8_t>& o = *oracle_;
+    for (size_t i = from; i < tr.size(); ++i) {
+        const Var v = litVar(tr[i]);
+        if (static_cast<size_t>(v) >= o.size()) continue;
+        const int8_t want = o[static_cast<size_t>(v)];
+        if (want == 0) continue;
+        const int8_t got = litSign(tr[i]) ? static_cast<int8_t>(-1) : static_cast<int8_t>(1);
+        if (got != want) {
+            stats_.oracleVar = v;
+            return true;
+        }
+    }
+    return false;
 }
 
 bool Solver::verify() const {
@@ -643,6 +680,7 @@ bool Solver::attempt(SolveStatus& status) {
     }
 
     while (static_cast<int>(master_.assignedCount()) < nvars) {
+        if (oracleTripped_) { status = SolveStatus::OracleMismatch; return false; }
         if (interruptRequested()) { status = SolveStatus::Interrupted; return false; }
         if (opt_.timeout > 0.0 &&
             static_cast<double>(nowNs() - startNs_) * 1e-9 > opt_.timeout) {
@@ -676,6 +714,8 @@ bool Solver::attempt(SolveStatus& status) {
                 ++stats_.rejectedResults;
             }
         }
+
+        if (oracleTripped_) { status = SolveStatus::OracleMismatch; return false; }
 
         if (hard) {
             status = SolveStatus::Exhausted;
@@ -780,6 +820,14 @@ SolveResult Solver::solve() {
         workers_.push_back(std::move(w));
     }
 
+    if (oracleBroken(0)) {
+        res.status = SolveStatus::OracleMismatch;
+        res.message = "the unit clauses already contradict the reference solution";
+        stats_.assignedVars = master_.assignedCount();
+        res.stats = stats_;
+        return res;
+    }
+
     SolveStatus status = SolveStatus::Exhausted;
     const uint64_t solveStart = nowNs();
 
@@ -819,11 +867,15 @@ SolveResult Solver::solve() {
         }
 
         if (attempt(status)) break;
-        if (status == SolveStatus::Interrupted || status == SolveStatus::Timeout) break;
+        if (status == SolveStatus::Interrupted || status == SolveStatus::Timeout ||
+            status == SolveStatus::OracleMismatch) {
+            break;  // tuning: a contradicted literal ends the trial, not just the attempt
+        }
         ++stats_.restarts;
     }
 
     stats_.solveSeconds = static_cast<double>(nowNs() - solveStart) * 1e-9;
+    stats_.assignedVars = master_.assignedCount();
     res.status = status;
     res.stats = stats_;
     if (status == SolveStatus::Solved) {
