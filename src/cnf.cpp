@@ -26,6 +26,14 @@ bool readLong(const char*& p, long long& out) {
 }  // namespace
 
 void Cnf::buildOccurrences() {
+    // Programmatically constructed formulas need the same metadata as loaded
+    // files; the sampler sizes its clause scratch buffers from maxClauseLen.
+    maxClauseLen = 0;
+    hasEmptyClause = false;
+    for (size_t c = 0; c < clauseCount(); ++c) {
+        maxClauseLen = std::max(maxClauseLen, clauseLen(c));
+        hasEmptyClause = hasEmptyClause || clauseLen(c) == 0;
+    }
     const size_t nLits = static_cast<size_t>(numVars) * 2;
     occStart.assign(nLits + 1, 0);
     for (Lit l : lits) {
@@ -136,11 +144,11 @@ bool loadDimacs(const std::string& path, Cnf& cnf, std::vector<Lit>& unitLits,
                 sawTerminator = true;
                 break;
             }
-            const long long av = v < 0 ? -v : v;
-            if (av > kMaxVar) {
+            if (v < -static_cast<long long>(kMaxVar) || v > kMaxVar) {
                 error = "variable number out of range in " + path + ": " + std::to_string(v);
                 return false;
             }
+            const long long av = v < 0 ? -v : v;
             if (static_cast<int>(av) > maxVarSeen) maxVarSeen = static_cast<int>(av);
             clause.push_back(static_cast<int>(v));
         }

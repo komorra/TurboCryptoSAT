@@ -23,13 +23,114 @@
 #include "propagator.h"
 #include "rng.h"
 #include "signatures.h"
+#include "solver_worker.h"
 
 namespace tcs {
+
+// Exercise the actual probe with a population valid for the relaxed formula.
+// A sample-derived conflict must not remove a logically viable branch.
+struct SolverTestAccess {
+    static bool check() {
+        Cnf cnf;
+        cnf.numVars = 3;
+        cnf.lits = {mkLit(0, false), mkLit(1, true), mkLit(2, true)};
+        cnf.start = {0, 3};
+        cnf.buildOccurrences();
+        Options opt;
+        opt.mink = 0;
+        Solver solver(cnf, opt);
+        solver.master_.attach(cnf);
+        solver.master_.enqueue(mkLit(2, false));
+        solver.master_.propagate();
+        SignatureConfig cfg;
+        cfg.words = 1;
+        std::string error;
+        if (!solver.sig_.generate(cnf, {mkLit(0, true), mkLit(1, false), mkLit(2, true)},
+                                  {}, cfg, error)) return false;
+        // Try both branch visitation orders, always probing x.
+        int checked = 0;
+        for (uint64_t seed = 0; seed < 100; ++seed) {
+            Rng rng(seed);
+            if (rng.below(3) != 0) continue;
+            Solver::Worker w;
+            w.prop.attach(cnf);
+            w.rng.reseed(seed);
+            w.stamp.assign(3, 0);
+            w.stampPol.assign(3, 0);
+            solver.runProbe(w);
+            if (w.hardConflict || !w.result.empty()) return false;
+            // A wrapped stamp must not match an entry from an ancient pass.
+            w.stampCounter = UINT32_MAX;
+            w.stamp.assign(3, 1);
+            std::vector<Lit> lhs = {mkLit(0, false)};
+            Solver::intersectLits(w, lhs, {mkLit(1, false)});
+            if (!lhs.empty()) return false;
+            ++checked;
+        }
+        return checked > 0;
+    }
+};
+
 namespace {
 
 struct Failure {
     const char* what = nullptr;
 };
+
+bool checkRegressions(Failure& fail) {
+    if (!SolverTestAccess::check()) {
+        fail.what = "statistical branch conflict or intersection stamp regression";
+        return false;
+    }
+    Cnf cnf;
+    cnf.numVars = 2;
+    cnf.lits = {mkLit(0, false)};
+    cnf.start = {0, 1};
+    cnf.buildOccurrences();
+    Options opt;
+    opt.outputsGiven = true;
+    opt.outputs = {-2};
+    opt.seedGiven = true;
+    Solver solver(cnf, opt);
+    const SolveResult result = solver.solve();
+    if (result.status != SolveStatus::Solved || result.assignment[1] != -1 ||
+        result.stats.signatureBytes || result.stats.sampleSeconds || result.stats.gf2Runs) {
+        fail.what = "root model must honour unused outputs and bypass preprocessing";
+        return false;
+    }
+    opt.outputs = {INT32_MIN};
+    Solver invalid(cnf, opt);
+    if (invalid.solve().status != SolveStatus::Error) {
+        fail.what = "minimum signed output literal must be rejected without overflow";
+        return false;
+    }
+    SignatureConfig cfg;
+    cfg.words = 2;
+    Signatures sig;
+    std::string error;
+    if (!sig.generate(cnf, {}, {}, cfg, error) || sig.validSamples() != 128 ||
+        sig.var(0)[0] != UINT64_MAX || sig.var(0)[1] != UINT64_MAX) {
+        fail.what = "sampler ignored a unit clause";
+        return false;
+    }
+    if (sig.generate(cnf, {mkLit(0, true)}, {}, cfg, error)) {
+        fail.what = "sampler accepted contradictory fixed literals";
+        return false;
+    }
+    cfg.focusLits = {mkLit(1, false), mkLit(1, true)};
+    if (sig.generate(cnf, {}, {}, cfg, error)) {
+        fail.what = "sampler accepted contradictory focus literals";
+        return false;
+    }
+    cfg.focusLits.clear();
+    cnf.start.push_back(1);
+    cnf.buildOccurrences();
+    if (!sig.generate(cnf, {}, {}, cfg, error) || sig.validSamples() != 0) {
+        fail.what = "sampler accepted lanes despite an empty clause";
+        return false;
+    }
+    return true;
+}
 
 // A random 1..3 literal CNF. Short clauses and few variables keep the models
 // dense enough that most instances are satisfiable and most root sets survive,
@@ -58,6 +159,35 @@ Cnf randomCnf(Rng& rng, int numVars, int numClauses) {
     }
     cnf.buildOccurrences();
     return cnf;
+}
+
+bool checkSampling(uint64_t seed, Failure& fail) {
+    Rng rng(seed);
+    const Cnf cnf = randomCnf(rng, 8, 16);
+    SignatureConfig cfg;
+    cfg.words = 2;
+    cfg.seed = seed;
+    Signatures sig;
+    std::string error;
+    if (!sig.generate(cnf, {}, {}, cfg, error)) {
+        // Conflicting units are an explicitly rejected sampling request.
+        return error == "contradictory fixed or focused sample literals";
+    }
+    for (int w = 0; w < sig.words(); ++w) {
+        for (size_t c = 0; c < cnf.clauseCount(); ++c) {
+            uint64_t sat = 0;
+            for (uint32_t i = 0; i < cnf.clauseLen(c); ++i) {
+                const Lit l = cnf.clauseBegin(c)[i];
+                const uint64_t val = sig.var(litVar(l))[w];
+                sat |= litSign(l) ? ~val : val;
+            }
+            if (sig.validMask()[w] & ~sat) {
+                fail.what = "propagated sample falsifies a clause";
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 // Every satisfying assignment, one bit per variable. numVars stays under 16, so
@@ -535,11 +665,20 @@ bool checkFocus(uint64_t seed, Failure& fail) {
 int runSelfTest(uint64_t seed, int rounds) {
     if (rounds <= 0) rounds = 20000;
     Failure fail;
+    if (!checkRegressions(fail)) {
+        std::printf("FAIL regression: %s\n", fail.what);
+        return 1;
+    }
     std::printf("TurboCryptoSAT self test - %d rounds from seed %llu\n", rounds,
                 static_cast<unsigned long long>(seed));
 
     for (int i = 0; i < rounds; ++i) {
         const uint64_t s = seed + static_cast<uint64_t>(i);
+        if (!checkSampling(s, fail)) {
+            std::printf("FAIL sampling round %d (--seed %llu): %s\n", i,
+                        static_cast<unsigned long long>(s), fail.what);
+            return 1;
+        }
         if (!checkCdcl(s, fail)) {
             std::printf("FAIL cdcl round %d (--seed %llu): %s\n", i,
                         static_cast<unsigned long long>(s), fail.what);
@@ -561,7 +700,8 @@ int runSelfTest(uint64_t seed, int rounds) {
             return 1;
         }
     }
-    std::printf("ok - cdcl contract, gf2 elimination, propagator undo and focused sampling "
+    std::printf("ok - solver regressions, cdcl contract, gf2 elimination, propagator undo, "
+                "propagated and focused sampling "
                 "over %d formulas each\n", rounds);
     return 0;
 }

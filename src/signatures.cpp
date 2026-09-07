@@ -54,9 +54,38 @@ bool Signatures::generate(const Cnf& cnf, const std::vector<Lit>& fixedLits,
     focusLanes_ = 0;
     focusRounds_ = 0;
 
+    // All generators must honour the same units, including callers that pass
+    // a CNF directly rather than Solver's unit-free sampling formula.
+    std::vector<Lit> units = fixedLits;
+    for (size_t c = 0; c < cnf.clauseCount(); ++c) {
+        if (cnf.clauseLen(c) == 0) {
+            disable(cnf.numVars, words_);
+            return true;
+        }
+        if (cnf.clauseLen(c) == 1) units.push_back(cnf.clauseBegin(c)[0]);
+    }
+    std::vector<int8_t> requested(static_cast<size_t>(numVars_), 0);
+    auto validate = [&](const std::vector<Lit>& lits) {
+        for (Lit l : lits) {
+            const Var v = litVar(l);
+            if (v < 0 || v >= numVars_) {
+                error = "sample literal out of range";
+                return false;
+            }
+            const int8_t want = litSign(l) ? -1 : 1;
+            if (requested[v] && requested[v] != want) {
+                error = "contradictory fixed or focused sample literals";
+                return false;
+            }
+            requested[v] = want;
+        }
+        return true;
+    };
+    if (!validate(units) || !validate(cfg.focusLits)) return false;
+
     std::vector<int8_t> fixedVals;
     const GateNetwork* net = gateDisabled_ ? nullptr
-                                           : usableNetwork(cfg.gates, cnf, fixedLits, fixedVals);
+                                           : usableNetwork(cfg.gates, cnf, units, fixedVals);
     const size_t cells = static_cast<size_t>(numVars_) * static_cast<size_t>(words_);
 
     // The target bits split in two by what it costs to honour them. One that
@@ -89,9 +118,9 @@ bool Signatures::generate(const Cnf& cnf, const std::vector<Lit>& fixedLits,
     // this hard to hit, an almost empty one. It is the honest answer rather
     // than the fast one, and the lane count in the summary shows which it was.
     std::vector<Lit> propFixed;
-    const std::vector<Lit>* propLits = &fixedLits;
+    const std::vector<Lit>* propLits = &units;
     if (!cfg.focusLits.empty()) {
-        propFixed = fixedLits;
+        propFixed = units;
         propFixed.insert(propFixed.end(), cfg.focusLits.begin(), cfg.focusLits.end());
         propLits = &propFixed;
     }

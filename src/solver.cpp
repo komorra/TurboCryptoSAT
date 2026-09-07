@@ -1,4 +1,4 @@
-#include "solver.h"
+#include "solver_worker.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -21,37 +21,6 @@ const char* toString(SolveStatus s) {
     }
     return "?";
 }
-
-struct Solver::Worker {
-    Propagator prop;
-    Rng rng;
-    size_t synced = 0;
-    size_t base = 0;
-
-    std::vector<Lit> forcedBase;
-    std::vector<Lit> forced;
-    std::vector<Lit> sigOut;
-    std::vector<Lit> branchLits;
-    std::vector<Lit> sound;
-    std::vector<Lit> stat;
-    std::vector<Lit> result;
-    std::vector<Lit> combo;
-    std::vector<Var> probeVars;
-    std::vector<int> aliveMasks;
-
-    std::vector<int32_t> stamp;
-    std::vector<int8_t> stampPol;
-    int32_t stampCounter = 0;
-
-    std::vector<uint64_t> keep;
-    std::vector<uint32_t> keepIdx;
-    std::vector<uint64_t> keepVal;
-    std::vector<Var> candidates;
-
-    bool hardConflict = false;
-    uint64_t sigVerdicts = 0;
-    uint64_t sigBails = 0;
-};
 
 Solver::Solver(const Cnf& cnf, const Options& opt)
     : cnf_(cnf), search_(&cnf), opt_(opt), rng_(opt.seed) {}
@@ -131,34 +100,11 @@ PrepareResult Solver::prepareBase(std::string& error) {
     }
     master_.attach(searchCnf());
 
-    // Variables that occur in no clause at all. DIMACS files that declare fewer
-    // variables than their largest index leave gaps like this, and the loader
-    // widens numVars to whatever it sees, so the gaps become variables. Any
-    // value satisfies the formula, but the solver still has to assign every one
-    // of them before it can call the instance done - and left to the probe loop
-    // that happens one statistical accident at a time. Pin them here instead:
-    // they land in the base trail, so a restart keeps them.
-    stats_.unusedVars = 0;
-    for (Var v = 0; v < cnf_.numVars; ++v) {
-        const size_t p = static_cast<size_t>(v) * 2u;
-        if (cnf_.occStart[p] == cnf_.occStart[p + 2]) {
-            // Any value works, but under a tuning oracle it has to be *that*
-            // value: pinning the opposite would abort the trial on the spot for
-            // a variable no clause even mentions.
-            bool negate = false;
-            if (oracle_ && static_cast<size_t>(v) < oracle_->size()) {
-                negate = (*oracle_)[static_cast<size_t>(v)] < 0;
-            }
-            master_.enqueue(mkLit(v, negate));
-            ++stats_.unusedVars;
-        }
-    }
-
     targetLits_.clear();
     sampleFixed_.clear();
     if (opt_.outputsGiven) {
         for (int d : opt_.outputs) {
-            const int av = d < 0 ? -d : d;
+            const int64_t av = d < 0 ? -static_cast<int64_t>(d) : d;
             if (av < 1 || av > cnf_.numVars) {
                 error = "output literal out of range: " + std::to_string(d) +
                         " (the formula has " + std::to_string(cnf_.numVars) + " variables)";
@@ -186,6 +132,31 @@ PrepareResult Solver::prepareBase(std::string& error) {
             return PrepareResult::Unsat;
         }
     }
+    // Variables that occur in no clause at all. DIMACS files that declare fewer
+    // variables than their largest index leave gaps like this, and the loader
+    // widens numVars to whatever it sees, so the gaps become variables. Any
+    // value satisfies the formula, but the solver still has to assign every one
+    // of them before it can call the instance done - and left to the probe loop
+    // that happens one statistical accident at a time. Pin them here instead:
+    // they land in the base trail, so a restart keeps them.
+    stats_.unusedVars = 0;
+    // Pin unused variables only after the requested outputs have been applied.
+    // An absent variable is free in the CNF, but may still have an explicit target.
+    for (Var v = 0; v < cnf_.numVars; ++v) {
+        const size_t p = static_cast<size_t>(v) * 2u;
+        if (cnf_.occStart[p] == cnf_.occStart[p + 2]) {
+            // Any value works, but under a tuning oracle it has to be *that*
+            // value: pinning the opposite would abort the trial on the spot for
+            // a variable no clause even mentions.
+            bool negate = false;
+            if (oracle_ && static_cast<size_t>(v) < oracle_->size()) {
+                negate = (*oracle_)[static_cast<size_t>(v)] < 0;
+            }
+            if (!master_.assigned(v)) master_.enqueue(mkLit(v, negate));
+            ++stats_.unusedVars;
+        }
+    }
+
     if (!master_.propagate()) {
         error = "propagating the unit clauses and the output valuation conflicts";
         return PrepareResult::Unsat;
@@ -439,7 +410,10 @@ bool Solver::buildSignatures(std::string& error) {
 // a per-worker stamp array so it stays linear and allocation free.
 void Solver::intersectLits(Worker& w, std::vector<Lit>& dst, const std::vector<Lit>& other) {
     if (dst.empty()) return;
-    ++w.stampCounter;
+    if (++w.stampCounter == 0) {
+        std::fill(w.stamp.begin(), w.stamp.end(), 0);
+        ++w.stampCounter;
+    }
     for (Lit l : other) {
         const size_t v = static_cast<size_t>(l >> 1);
         w.stamp[v] = w.stampCounter;
@@ -466,6 +440,11 @@ void Solver::collectSortedInit() {
 }
 
 void Solver::signatureOutcome(Worker& w, const std::vector<Lit>& forced, std::vector<Lit>& out) {
+    if (sig_.validSamples() <= static_cast<uint64_t>(opt_.mink)) {
+        ++w.sigBails;
+        out.assign(forced.begin(), forced.end());
+        return;
+    }
     const int words = sig_.words();
     const uint64_t* valid = sig_.validMask();
 
@@ -474,10 +453,20 @@ void Solver::signatureOutcome(Worker& w, const std::vector<Lit>& forced, std::ve
 
     for (Lit l : forced) {
         const uint64_t* s = sig_.var(l >> 1);
+        uint64_t any = 0;
         if (l & 1) {
-            for (int i = 0; i < words; ++i) w.keep[static_cast<size_t>(i)] &= ~s[i];
+            for (int i = 0; i < words; ++i)
+                any |= (w.keep[static_cast<size_t>(i)] &= ~s[i]);
         } else {
-            for (int i = 0; i < words; ++i) w.keep[static_cast<size_t>(i)] &= s[i];
+            for (int i = 0; i < words; ++i)
+                any |= (w.keep[static_cast<size_t>(i)] &= s[i]);
+        }
+        // Filtering is monotone. In the direct pass thousands of assigned
+        // literals can remain after the first few already emptied the mask.
+        if (!any) {
+            ++w.sigBails;
+            out.assign(forced.begin(), forced.end());
+            return;
         }
     }
 
@@ -656,6 +645,10 @@ bool Solver::runProbe(Worker& w) {
     // the other one's conflict, and that is where the filter window is at its
     // most informative, since it now holds a literal known to be forced.
     w.result = w.sound;
+    // No filter can increase the population. Avoid repeating both BCP branches
+    // and scanning the table when a statistical verdict is impossible.
+    if (sig_.validSamples() <= static_cast<uint64_t>(opt_.mink))
+        return !w.result.empty();
 
     // A random window of the current assignment, taken in variable order so the
     // forced literals stay topologically close to each other. It is drawn once
@@ -666,9 +659,9 @@ bool Solver::runProbe(Worker& w) {
     if (!sortedInit_.empty() && effectiveInitk_ > 0) {
         const size_t n = sortedInit_.size();
         const size_t startAt = w.rng.below(static_cast<uint32_t>(n));
-        const size_t take = std::min<size_t>(static_cast<size_t>(effectiveInitk_), n);
+        const size_t take = std::min<size_t>(static_cast<size_t>(effectiveInitk_), n - startAt);
         for (size_t i = 0; i < take; ++i) {
-            w.forcedBase.push_back(sortedInit_[(startAt + i) % n]);
+            w.forcedBase.push_back(sortedInit_[startAt + i]);
         }
     }
 
@@ -689,13 +682,23 @@ bool Solver::runProbe(Worker& w) {
         signatureOutcome(w, w.forced, w.sigOut);
 
         bool ok = true;
+        // The branch assumptions remain necessary even if the sample scan
+        // returned no literals (or excluded an already assigned variable).
+        for (Lit l : combo) {
+            if (!w.prop.enqueue(l)) { ok = false; break; }
+        }
         for (Lit l : w.sigOut) {
+            if (!ok) break;
             if (!w.prop.enqueue(l)) { ok = false; break; }
         }
         if (ok) ok = w.prop.propagate();
         if (!ok) {
             w.prop.undoTo(w.base);
-            continue;
+            // A statistical conflict does not refute this branch. Keep its
+            // plain propagation closure in the intersection instead of silently
+            // turning the other branches' guesses into unconditional literals.
+            for (Lit l : combo) w.prop.enqueue(l);
+            w.prop.propagate();  // this combination survived stage one
         }
         const std::vector<Lit>& tr = w.prop.trail();
         w.branchLits.assign(tr.begin() + static_cast<std::ptrdiff_t>(w.base), tr.end());
@@ -1035,6 +1038,18 @@ SolveResult Solver::solve() {
     startNs_ = nowNs();
     lastTickNs_ = 0;
     errorMessage_.clear();
+    // A complete root model needs neither parity extraction nor samples. Check
+    // again after GF(2), which can finish the assignment too.
+    auto rootSolved = [&] {
+        if (master_.assignedCount() != static_cast<size_t>(cnf_.numVars) || !verify())
+            return false;
+        res.status = SolveStatus::Solved;
+        res.assignment = master_.values();
+        stats_.assignedVars = master_.assignedCount();
+        stats_.solveSeconds = static_cast<double>(nowNs() - startNs_) * 1e-9;
+        res.stats = stats_;
+        return true;
+    };
 
     if (!opt_.seedGiven) {
         rng_.reseed(nowNs() ^ 0xA5A5A5A5DEADBEEFull);
@@ -1059,6 +1074,7 @@ SolveResult Solver::solve() {
             res.message = error;
             return res;
     }
+    if (rootSolved()) return res;
     // Before anything reads the formula: recover the parity constraints and
     // reduce them. This can widen the base assignment and can add clauses to
     // what the search runs on, so it has to happen before master_'s trail is
@@ -1076,6 +1092,7 @@ SolveResult Solver::solve() {
             return res;
     }
 
+    if (rootSolved()) return res;
     buildSampleCnf();
     // Reading the gates back is linear in the formula and pays for itself many
     // times over: a circuit is executed once per population instead of being
@@ -1119,12 +1136,12 @@ SolveResult Solver::solve() {
         stats_.attempt = static_cast<uint32_t>(a);
 
         // How many assigned literals each probe filters the samples with is the
-        // one parameter with no safe default: a wide filter leaves too many
-        // samples for anything to look constant, a narrow one leaves so few
+        // one parameter with no safe default: a narrow filter leaves too many
+        // samples for anything to look constant, a wide one leaves so few
         // that merely biased variables pass for implied ones and poison the
         // assignment. Each restart halves it, so the attempts double as a
         // search over that trade-off, from aggressive to conservative.
-        effectiveInitk_ = std::max(1, opt_.initk >> (a - 1));
+        effectiveInitk_ = std::max(1, opt_.initk >> std::min(a - 1, 30));
 
         master_.undoTo(baseTrail);
         for (auto& w : workers_) {

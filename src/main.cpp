@@ -546,7 +546,9 @@ void printSummary(const RunOutcome& r, const std::string& path) {
     std::printf("  assigned     %llu / %zu variables\n",
                 static_cast<unsigned long long>(s.assignedVars), r.numVars);
     std::printf("  attempts     %u (restarts %u)\n", s.attempt, s.restarts);
-    if (s.gateSampling) {
+    if (s.totalSamples == 0) {
+        std::printf("  circuit      sampling not needed or not started\n");
+    } else if (s.gateSampling) {
         std::printf("  circuit      %llu gates recovered, samples executed\n",
                     static_cast<unsigned long long>(s.gates));
     } else if (s.gates > 0) {

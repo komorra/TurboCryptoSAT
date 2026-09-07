@@ -130,6 +130,7 @@ public:
     size_t targetLitCount() const { return targetLits_.size(); }
 
 private:
+    friend struct SolverTestAccess;
     struct Worker;
 
     void buildSampleCnf();

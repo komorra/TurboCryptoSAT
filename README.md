@@ -43,6 +43,11 @@ away with that is a population of samples.
    dilemma part is sound; the sample part is a statistical bet.
 5. **Repeat** until every variable is assigned, then verify the assignment against the formula.
 
+A branch whose sample-derived literals conflict remains in the intersection with its plain
+propagation closure. Only a conflict established before adding statistical guesses can refute
+the branch. The contiguous filter window stops at the end of the ordered assignment, as in the
+C# prototype; it does not wrap from the last variable back to the first.
+
 Because step 4 can be wrong, the solver can paint itself into a corner. When every polarity of
 a probe is refuted, the attempt is dead and the solver restarts with a fresh sample population
 (five attempts by default). This makes it a tool for **satisfiable** instances — reduced-round
@@ -54,8 +59,8 @@ a **bounded CDCL phase** — see [Plateaus](#plateaus). Nothing about it is a gu
 back only literals it has proved.
 
 The one parameter with no safe default is `initk`, the width of the window in step 3. Each
-literal in it roughly halves the surviving sample set: too wide and nothing looks constant, too
-narrow and merely *biased* variables — an AND deep in a circuit that is almost always 0 — pass
+literal in it roughly halves the surviving sample set: too few literals and nothing looks constant, too
+many and merely *biased* variables — an AND deep in a circuit that is almost always 0 — pass
 for implied ones and poison the assignment. So the restarts double as a search over it: every
 attempt halves `initk`, walking from aggressive to conservative.
 
@@ -236,11 +241,10 @@ comes down with the fast ones. That is the case the mechanism was built for — 
 whose intermediates nothing else pins down, where a population that already agrees with the
 target on eight bits carries information a free population does not.
 
-`23-sha256-r14-c03` is the warning attached to it. That instance is solved by propagation and
-the GF(2) pass in 0.08 s, before the sample population is ever consulted — and the focus pass is
-paid **up front, unconditionally**, so the whole 11.8 s difference is preprocessing for a
-population the run never needed. `--focus` is a cost you commit to before the solver knows
-whether it will use it. On a family that finishes without the statistical layer, set it to `0`.
+These measurements predate the root-model shortcut. The solver now checks for a complete,
+verified model after unit propagation and again after GF(2), before allocating signatures or
+focusing the population. `23-sha256-r14-c03` therefore skips sampling entirely. Instances that
+still need search pay the focus cost; `--focus 0` disables it.
 
 The `14-circuit` row is the honest middle: no better on average, but the 23.88 s seed is gone.
 Narrowing the population trades a chance of a very good draw for a narrower spread of draws.
