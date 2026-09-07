@@ -162,6 +162,89 @@ The middle line is the one to read closely. A handful of unexplained clauses on 
 is a circuit means one pattern this matcher does not know, and the whole fast path is lost to
 it.
 
+### Focusing the population on the target
+
+A free execution of the circuit reproduces the target valuation only by accident, and on a hash
+preimage that accident has probability `2^-256`. So the population the filter draws from is, by
+default, a set of executions that agree with the target on nothing at all. `--focus <n>` narrows
+it: the first `n` literals of the target valuation are imposed on every lane, and a lane that
+misses one is thrown back and redrawn until it hits.
+
+```
+--focus 0     samples are free executions of the circuit          (the original behaviour)
+--focus 8     every sample reproduces 8 bits of the target        (the default)
+--focus 24    every sample reproduces 24 bits of the target       (expensive; see below)
+```
+
+The loop is the reference implementation's `ComputeEx`, done a word at a time. A lane that has
+landed on the target is finished: every later redraw is masked off it, so the population
+converges lane by lane rather than being discarded and regenerated whole. Lanes are redrawn 64
+at a time to keep the bit parallelism, and a 64-lane word whose every lane has landed drops out
+of the loop entirely. What that costs is therefore the expected *worst* of 64 geometric draws
+per word — around `4.7 * 2^n` redraws of a word — rather than `2^n` redraws of the whole
+population:
+
+| `24-sha256-r17-c03.cnf`, 32 threads | `--focus 0` | `--focus 8` |
+| --- | --- | --- |
+| population built in | 0.29 s | 17.9 s |
+| redraws dispatched | — | 2 720 |
+| valid lanes | 65 536 | 65 536 |
+
+That is the shape of the knob: every bit doubles the price. The dashboard grows a `focus` row
+while the loop runs, and the phase in the header reads `focusing`, because on a large instance
+this is a preprocessing pass long enough to look like a hang otherwise:
+
+```
+  focus        8 bits  41216 / 65536 lanes  1184 redraws
+  [====================                    ]
+```
+
+Two things bound it. A target bit that lands on a *free* variable is not sampled for at all —
+the variable is simply pinned, exactly as a unit clause is — so only bits a gate defines reach
+the rejection loop. And the loop is interruptible: `--timeout` and `Ctrl+C` stop it, and every
+lane that had not landed by then is struck from the valid mask rather than left in the
+population unfocused. Asking for more bits than the budget can pay for therefore yields a
+smaller population, never a wrong one:
+
+```
+  focus        24 target bits, 17 / 65536 lanes reproduce them after 1536 redraws
+  samples      17 / 65536 lanes in 14.98s
+```
+
+On an instance with no usable gate network the rejection loop has nothing to execute, and the
+target bits are handed to the propagating generator as ordinary fixed literals instead: lanes
+that cannot be extended to honour them conflict and drop out. That reaches the same population
+far less efficiently, and on outputs this hard to hit, an almost empty one — which the lane
+count says plainly.
+
+#### What it is worth
+
+Solve counts say nothing here — the shipped suite is mostly instances that finish in under a
+second or not within a minute, and both are blind to this. **Time to solve is the measurement**,
+three seeds per cell, 60 s cap:
+
+| instance | `--focus 0` | `--focus 8` |
+| --- | --- | --- |
+| `19-xorcircuit-i96-g2500` | 3.07 s, 7.70 s, 7.00 s | **0.83 s, 1.21 s, 4.86 s** |
+| `14-circuit-i128-g6000` | 4.61 s, 23.88 s, 5.61 s | 6.03 s, 7.32 s, 5.11 s |
+| `23-sha256-r14-c03` | **0.08 s, 0.08 s, 0.08 s** | 11.46 s, 12.12 s, 11.86 s |
+| `20-xorcircuit-i128-g4000` | timeout | timeout |
+| `26-sha256-r17-c04` | timeout | timeout |
+
+The XOR circuit family is where it earns its keep: three to six times faster, and the slow seed
+comes down with the fast ones. That is the case the mechanism was built for — long parity chains
+whose intermediates nothing else pins down, where a population that already agrees with the
+target on eight bits carries information a free population does not.
+
+`23-sha256-r14-c03` is the warning attached to it. That instance is solved by propagation and
+the GF(2) pass in 0.08 s, before the sample population is ever consulted — and the focus pass is
+paid **up front, unconditionally**, so the whole 11.8 s difference is preprocessing for a
+population the run never needed. `--focus` is a cost you commit to before the solver knows
+whether it will use it. On a family that finishes without the statistical layer, set it to `0`.
+
+The `14-circuit` row is the honest middle: no better on average, but the 23.88 s seed is gone.
+Narrowing the population trades a chance of a very good draw for a narrower spread of draws.
+
 ### Plateaus
 
 A probe is barren when both polarities survive and their outcomes intersect down to nothing new.
@@ -195,6 +278,44 @@ and on the instances where it fired most — random k-SAT, where the population 
 at all — it was close to a coin flip. `--no-cdcl` restores the plateau to resampling and further
 probing only, which is useful mainly for measuring what the statistical layer does on its own.
 
+### Linear reasoning over the parities
+
+A Tseitin encoder writes `a ^ b ^ c = 1` as four ternary clauses, and unit propagation over
+those four is exactly as strong as the constraint: it fires when two of the three are known and
+not before. What it cannot do is *add* two constraints together. Chains of parities are the
+shape of a hash round function, so `gf2.cpp` recovers every XOR the clauses encode and runs
+Gaussian elimination over them. A row that reduces to one variable is a proven literal, one that
+reduces to two is an equivalence, and one that reduces to `0 = 1` refutes the assignment. All
+three are consequences of the formula — the layer contributes no bets. It runs once before the
+search, then on a stride of `--gf2-interval` new assignments and at every plateau; a pass costs
+single-digit milliseconds even at 20 rounds.
+
+**What it actually bought, measured.** Not what the idea promises, so the numbers are worth
+stating plainly. At 17 rounds the system is real — 8085 equations over 12 752 of the 24 765
+variables — and reduces correctly. But it proves **zero units**, and of the 715 equivalences it
+derives, **712 are things unit propagation already reaches**:
+
+| instance | equations | equivalences | already reachable by BCP | genuinely new |
+| --- | ---: | ---: | ---: | ---: |
+| `24-sha256-r17-c03` | 8085 | 715 | 712 | **3** |
+| `25-sha256-r20-c03` | 9701 | 619 | 617 | **2** |
+| `26-sha256-r17-c04` | 8265 | 601 | 598 | **3** |
+| `19-xorcircuit-i96-g2500` | 1773 | 138 | 124 | **14** |
+
+The reason is structural: these encodings already cut every parity into three-variable gates
+with explicit intermediate variables, and propagation walks those intermediates perfectly well.
+The classic elimination win needs long parity chains whose intermediates nothing else
+constrains, which is why the XOR-circuit family is the only one here with a real share of new
+facts.
+
+That measurement changed the design. Adding all 1430 clauses for 3 new facts made every probe
+propagate over a bigger formula and measurably *slowed* 17-round SHA-256, so each derived clause
+is now checked against propagation first and only kept when it cannot be reached — 6 clauses
+instead of 1430. With that filter the layer is a wash on SHA-256: variables assigned in 30 s are
+identical on seven of nine instance/seed pairs with `--no-gf2` and without. It is kept on by
+default because it is now close to free and it is the right tool for a genuinely parity-heavy
+instance, not because it moves this benchmark.
+
 ## Building
 
 Requires a C++17 compiler. Windows x64 and Linux are both supported and tested in CI
@@ -222,6 +343,7 @@ The result is a single self-contained binary, `build/turbocryptosat`.
 turbocryptosat <instance.cnf> [options]
 turbocryptosat benchmark <directory> [options]
 turbocryptosat gen-benchmark <directory>
+turbocryptosat selftest [rounds] [--seed <n>]
 ```
 
 The simplest possible run — the target valuation is taken from the unit clauses in the file
@@ -238,7 +360,8 @@ turbocryptosat sha256_17.cnf \
     --inputs 1-24 \                 # message bits are variables 1..24
     --outputs "-513 514 515 ..." \  # digest, as signed DIMACS literals
     --siglen 1024 \                 # 1024 lanes = 65536 samples per variable
-    --initk 8 --mink 32 \
+    --initk 6 --mink 640 \          # 640 surviving samples, not 640 lane words
+    --focus 8 \                     # every sample reproduces 8 bits of the digest
     --threads 16 --attempts 5
 ```
 
@@ -252,13 +375,16 @@ turbocryptosat sha256_17.cnf \
 | `--out <file>` | Solution path | `<instance>.solution.cnf` |
 | `--siglen <n>` | 64-bit lanes per variable; `n * 64` samples | `1024` |
 | `--initk <n>` | Literals of the assignment each probe filters the samples with; halved on every restart | `6` |
-| `--mink <n>` | Minimum surviving sample words for a signature verdict | `10` |
+| `--mink <n>` | Minimum surviving **samples** for a signature verdict — individual lanes, never 64-bit words | `640` |
 | `--probe-vars <n>` | Variables probed at once, giving `2^n` branches | `1` |
+| `--focus <n>` | Bits of the target valuation every sample must reproduce; lanes that miss one are redrawn until they hit, at a cost of about `2^n` redraws | `8` |
 | `--threads <n>` | Worker threads | hardware threads |
 | `--attempts <n>` | Restarts after a conflict | `5` |
 | `--stall-limit <n>` | Barren rounds before the samples are redrawn and, failing that, a CDCL phase runs | `1000` |
 | `--cdcl-conflicts <n>` | Conflict budget for one CDCL phase, doubled whenever a phase proves nothing; `0` means bounded only by `--timeout` | `10000` |
 | `--no-cdcl` | Never run a CDCL phase; answer plateaus by resampling and further probing only | off |
+| `--no-gf2` | Do not recover the XOR constraints or reduce them over GF(2) | off |
+| `--gf2-interval <n>` | New assignments between elimination passes; a pass also runs at every plateau | `16` |
 | `--sample-rounds <n>` | Retry rounds while building the samples | `12` |
 | `--keep-samples` | Reuse the sample population across restarts | off |
 | `--timeout <sec>` | Abort after this many seconds | unlimited |
@@ -282,6 +408,9 @@ The two are what make the method work, so it is worth being precise about them.
   imposed on the sample population — the samples have to be free executions of the circuit for
   the filtering in step 3 to mean anything. With `--outputs`, unit clauses are treated as
   structural constants instead and do constrain the samples.
+  `--focus <n>` is the dial between those two extremes: it imposes the first `n` bits of the
+  target on the population and leaves the rest free. See
+  [Focusing the population on the target](#focusing-the-population-on-the-target).
 
 ### Stopping a run
 
@@ -314,9 +443,13 @@ can be fed straight back into any SAT tool.
 ## The dashboard
 
 On an interactive terminal the solver draws a live view sized to the console. The left pane is
-a map of every clause in the formula, in a fixed order (by clause length, then by smallest
-variable) so a cell always stands for the same clauses; cells go from dark to green as their
-clauses become satisfied. The right pane is the run status.
+a map of the variables: variable 1 sits in the bottom left corner, the numbering runs left to
+right along each row and upwards from row to row, so the highest index is in the top right and
+every cell covers the same band of variables for the whole run. A cell goes from dark to green
+as the clauses its variables occur in become satisfied, which shows *where* in the formula the
+run is making ground - on a Tseitin-encoded circuit the numbering follows the circuit, so the
+map is roughly a picture of it. A blank cell is a band of variables that occur in no clause at
+all. The right pane is the run status.
 
 The layout is recomputed on every frame, so resizing the window is picked up within about a
 tenth of a second, and the status values switch to compact forms when the pane gets narrow. It is
@@ -328,29 +461,30 @@ the plain progress log is used instead.
 
 ```
  TurboCryptoSAT  |  solving  |  signature propagation
-##*...:................................... | STATUS
+########################################## | STATUS
+*##*#*..-+:.:::+#+:::::-#*+--::-########## |
+:##+-+---*#############################*** | attempt      1 / 5
+####################****#*#++**#+--#*+++-: | variables    7480/24765 30%
+####*++**+++++++:.+#-:...:-##--::--####### | [==========                      ]
+.:::.....:##-:-:::######################## | clauses sat  26078/82564 32%
+:+########*-:::::-########++++-----+---+#. | [==========                      ]
+:##-+-+--+++++--+-+--+--...:.......+-::::: |
+:-::--:...........:-......:#*#:-:++*+.:::. | elapsed      00:00:11
+.:::......#*:.:..:**:.....+#*-------++---: | eta          00:04:17
+..........+-----------::::::::::.......... | rate         28.8 v/s
+..::::..............................:..... |
+...................................:+:.... | probes       330048 ok66 rj0
+...................--:......:..:.......... | resamples    5  rst 0
+..:*-..................................... | cdcl         1 c10001 i0
 .......................................... |
-.......................................... | attempt      1 / 5
-.....:#......................:-....:...... | variables    7587/24765 31%
-...........--...-:.................+----+: | [==========                      ]
-::....:..:-.++..:#+--++---....:..-+-*-::-* | clauses sat  26468/82564 32%
-++++++++....+--+###-::-####*+++*.:..*--+## | [==========                      ]
-##########***---.++--#############*#-*+:#+ |
--*#############.+:+-:+*--##############+.. | elapsed      00:00:15
-.......................................... | eta          00:06:10
-.......................................... | rate         28.3 v/s
+.......................................... | samples      65536/65536
+.......................................... | tuning       1024/6/640
+.......................................... | focus        8b 65536/65536 r2720
+.......................................... | input vars   24
+.......................................... | gates        24741 exec
 .......................................... |
-.......................................... | probes       269408 ok94 rj0
-...................:..............++:..... | resamples    1  rst 0
-..........................-++............. | cdcl         2 c14903 i7
-..................:++:.::::::............. |
-...........+****+++--:.........+...-..*+:. | samples      65536/65536
-...-###*++++---::::....:-:.:*:++-:--.:+##* | tuning       1024/8/32
-*++**+-----:....*++++##++::::.:#########*- | input vars   24
------.:.-#+++###################*-++-+-.+. |
-:#+++*#################*+#++++:+--#+++#### | threads      32
-##############*++*++:..+.:#*++*########### | cpu          35 %
- clause map: sorted by length then first variable; # satisfied  . open
+.......................................... | threads      32
+ variable map: index rises left to right, bottom to top; # satisfied  . open
  press Ctrl+C or ESC ESC to abort
 ```
 
@@ -398,41 +532,50 @@ suite on a 16-core / 32-thread desktop, default settings, 60 seconds per instanc
 +------------------------------------+---------+---------+------------+-----+----------+----------+------------+
 | instance                           |    vars | clauses | status     | att |  sample  |   total  |     probes |
 +------------------------------------+---------+---------+------------+-----+----------+----------+------------+
-| 01-rand3sat-n060.cnf               |      60 |     252 | SOLVED     |   1 |    0.22s |    0.41s |      32032 |
-| 02-rand3sat-n100.cnf               |     100 |     420 | SOLVED     |   1 |    0.05s |    0.26s |      32032 |
-| 03-rand3sat-n150.cnf               |     150 |     630 | SOLVED     |   1 |    0.36s |    0.57s |      32032 |
-| 04-rand3sat-n220.cnf               |     220 |     924 | SOLVED     |   1 |    0.57s |    0.77s |      32032 |
-| 05-rand3sat-n320.cnf               |     320 |    1360 | SOLVED     |   1 |    0.60s |    1.09s |      64064 |
-| 06-rand3sat-n450.cnf               |     450 |    1912 | SOLVED     |   1 |    1.09s |    1.32s |      32032 |
-| 07-rand3sat-n650.cnf               |     650 |    2769 | SOLVED     |   1 |    2.34s |   15.95s |     192192 |
-| 08-rand3sat-n900.cnf               |     900 |    3834 | TIMEOUT    |   1 |    3.97s |   60.00s |     256256 |
-| 09-circuit-i24-g300.cnf            |     322 |     981 | SOLVED     |   1 |    0.00s |    0.79s |      96096 |
-| 10-circuit-i32-g600.cnf            |     625 |    1959 | SOLVED     |   1 |    0.01s |    2.35s |     293152 |
-| 11-circuit-i48-g1200.cnf           |    1242 |    3921 | SOLVED     |   1 |    0.01s |    1.20s |     148384 |
-| 12-circuit-i64-g2000.cnf           |    2059 |    6571 | SOLVED     |   1 |    0.02s |    1.76s |     208480 |
-| 13-circuit-i96-g3500.cnf           |    3594 |   11420 | SOLVED     |   1 |    0.02s |    3.33s |     348736 |
-| 14-circuit-i128-g6000.cnf          |    6125 |   19631 | SOLVED     |   2 |    0.06s |    4.65s |     446368 |
-| 15-xorcircuit-i24-g200.cnf         |     223 |     757 | SOLVED     |   1 |    0.00s |    0.78s |      96160 |
-| 16-xorcircuit-i32-g400.cnf         |     430 |    1502 | SOLVED     |   1 |    0.01s |    1.05s |     131552 |
-| 17-xorcircuit-i48-g800.cnf         |     846 |    3000 | SOLVED     |   1 |    0.01s |    0.75s |      96704 |
-| 18-xorcircuit-i64-g1500.cnf        |    1562 |    5586 | SOLVED     |   1 |    0.01s |    1.55s |     176736 |
-| 19-xorcircuit-i96-g2500.cnf        |    2590 |    9351 | SOLVED     |   1 |    0.02s |    2.34s |     175904 |
-| 20-xorcircuit-i128-g4000.cnf       |    4125 |   14908 | TIMEOUT    |   1 |    0.05s |   60.00s |     535936 |
-| 21-sha256-r08-c03.cnf              |   10490 |   35148 | SOLVED     |   1 |    0.02s |    0.04s |          0 |
-| 22-sha256-r11-c03.cnf              |   15177 |   50723 | SOLVED     |   1 |    0.03s |    0.05s |          0 |
-| 23-sha256-r14-c03.cnf              |   19894 |   66389 | SOLVED     |   1 |    0.05s |    0.07s |          0 |
-| 24-sha256-r17-c03.cnf              |   24765 |   82564 | TIMEOUT    |   1 |    0.43s |   60.01s |     935424 |
-| 25-sha256-r20-c03.cnf              |   29725 |   99060 | TIMEOUT    |   1 |    0.74s |   60.01s |    1014080 |
-| 26-sha256-r17-c04.cnf              |   25264 |   84217 | TIMEOUT    |   1 |    0.43s |   60.01s |     763552 |
+| 01-rand3sat-n060.cnf               |      60 |     252 | SOLVED     |   1 |    0.30s |    0.53s |      32032 |
+| 02-rand3sat-n100.cnf               |     100 |     420 | SOLVED     |   1 |    0.07s |    0.31s |      32032 |
+| 03-rand3sat-n150.cnf               |     150 |     630 | SOLVED     |   1 |    0.28s |    0.52s |      32032 |
+| 04-rand3sat-n220.cnf               |     220 |     924 | SOLVED     |   1 |    0.46s |    0.71s |      32032 |
+| 05-rand3sat-n320.cnf               |     320 |    1360 | SOLVED     |   1 |    1.06s |    1.37s |      32032 |
+| 06-rand3sat-n450.cnf               |     450 |    1912 | SOLVED     |   1 |    1.88s |    2.60s |      64064 |
+| 07-rand3sat-n650.cnf               |     650 |    2769 | SOLVED     |   1 |    6.38s |   47.58s |     256256 |
+| 08-rand3sat-n900.cnf               |     900 |    3834 | TIMEOUT    |   1 |    5.08s |   60.00s |     224224 |
+| 09-circuit-i24-g300.cnf            |     322 |     981 | SOLVED     |   1 |    0.07s |    0.36s |      32032 |
+| 10-circuit-i32-g600.cnf            |     625 |    1959 | SOLVED     |   1 |    0.13s |    0.87s |      80384 |
+| 11-circuit-i48-g1200.cnf           |    1242 |    3921 | SOLVED     |   1 |    0.28s |    4.41s |     424320 |
+| 12-circuit-i64-g2000.cnf           |    2059 |    6571 | SOLVED     |   1 |    0.10s |    3.28s |     309536 |
+| 13-circuit-i96-g3500.cnf           |    3594 |   11420 | SOLVED     |   1 |    0.98s |    6.44s |     475488 |
+| 14-circuit-i128-g6000.cnf          |    6125 |   19631 | SOLVED     |   1 |    2.33s |    6.22s |     264736 |
+| 15-xorcircuit-i24-g200.cnf         |     223 |     757 | SOLVED     |   1 |    0.13s |    0.42s |      32064 |
+| 16-xorcircuit-i32-g400.cnf         |     430 |    1502 | SOLVED     |   1 |    0.57s |    0.86s |      32128 |
+| 17-xorcircuit-i48-g800.cnf         |     846 |    3000 | SOLVED     |   1 |    0.22s |    0.56s |      32064 |
+| 18-xorcircuit-i64-g1500.cnf        |    1562 |    5586 | SOLVED     |   1 |    0.50s |    0.84s |      32704 |
+| 19-xorcircuit-i96-g2500.cnf        |    2590 |    9351 | SOLVED     |   1 |    0.72s |    4.62s |     128128 |
+| 20-xorcircuit-i128-g4000.cnf       |    4125 |   14908 | TIMEOUT    |   1 |    2.11s |   60.00s |     288288 |
+| 21-sha256-r08-c03.cnf              |   10490 |   35148 | SOLVED     |   1 |    4.56s |    4.58s |          0 |
+| 22-sha256-r11-c03.cnf              |   15177 |   50723 | SOLVED     |   1 |    8.95s |    8.98s |          0 |
+| 23-sha256-r14-c03.cnf              |   19894 |   66389 | SOLVED     |   1 |   13.77s |   13.80s |          0 |
+| 24-sha256-r17-c03.cnf              |   24765 |   82564 | TIMEOUT    |   1 |   16.92s |   60.01s |     182720 |
+| 25-sha256-r20-c03.cnf              |   29725 |   99060 | TIMEOUT    |   1 |   21.01s |   60.02s |     219968 |
+| 26-sha256-r17-c04.cnf              |   25264 |   84217 | TIMEOUT    |   1 |   15.68s |   60.01s |     287712 |
 +------------------------------------+---------+---------+------------+-----+----------+----------+------------+
 
-solved 21 / 26 instances in 341.11s
+solved 21 / 26 instances in 409.94s
 ```
 
 Read across the families rather than down the rows. The circuits it was built for fall in
 seconds. Reduced-round SHA-256 up to 14 rounds is finished by propagation from the pinned digest
 before the sample layer is even consulted — note the zero probe count — while 17 and 20 rounds
 are still past what it reaches in a minute; it gets roughly a third of the way and slows down.
+
+Then read the `sample` column against the `probes` column, because on this table the default
+`--focus 8` is the most expensive thing in the suite. Rows `21`–`23` solve with **zero probes**
+and still spend 4.6 s, 9.0 s and 13.8 s building a population nothing ever reads; rows `24`–`26`
+hand 16–21 s of their 60 s budget to the focus pass, which is why `24-sha256-r17-c03` runs
+182 720 probes here against 935 424 with `--focus 0`. The pass is unconditional and runs before
+the search does, so the solver cannot know yet that it will not need it. On the SHA family
+`--focus 0` is the better setting; the default earns itself back on the XOR circuits, where the
+population is what carries the run.
 
 The XOR-heavy rows and the random 3-SAT rows are where the plateau handler shows. Both families
 leave the probes with nothing to intersect — the first because parity structure is invisible to
@@ -456,15 +599,28 @@ that almost none of them are.
 
 ### Tests
 
-The benchmark is also the test suite. Every solved instance is re-checked clause by clause
-against the file it came from, independently of the solver's own bookkeeping; an assignment
-that does not satisfy the formula is reported as `BAD` rather than `SOLVED`, so a wrong answer
-fails the run rather than passing quietly. CI builds on Linux (GCC and Clang) and Windows
-(MSVC), regenerates the whole suite to check the generator is deterministic, and runs a short
-benchmark pass. Locally:
+The benchmark is the test suite for whether the solver answers correctly. Every solved instance
+is re-checked clause by clause against the file it came from, independently of the solver's own
+bookkeeping; an assignment that does not satisfy the formula is reported as `BAD` rather than
+`SOLVED`, so a wrong answer fails the run rather than passing quietly.
+
+That leaves one blind spot, and `selftest` fills it. The CDCL phase makes promises to the round
+loop that a solved instance cannot show: that a literal on its level 0 trail really is implied
+by the formula and the pinned assignment, that a root conflict means those roots really are
+refuted, that the search is back at level 0 whatever the phase returned. Break one of those and
+the solver quietly loses inference — or, in the other direction, hands the round loop a
+decision dressed up as a proof — without any instance coming back wrong. So the mode generates
+random formulas small enough that every model of one can be enumerated by brute force, and
+checks each claim against that enumeration; the propagator's `undoTo` is checked the same way, since a rollback
+that leaves the clause counters off shows up nowhere else either. It reports the seed of the
+first failure, and a few thousand rounds take well under a second.
+
+CI builds on Linux (GCC and Clang) and Windows (MSVC), regenerates the whole suite to check the
+generator is deterministic, and runs a short benchmark pass. Locally:
 
 ```bash
-ctest --test-dir build          # smoke tests
+ctest --test-dir build          # smoke tests plus the property tests
+turbocryptosat selftest 50000   # the property tests on their own, longer
 ./benchmark.sh --timeout 30     # the full suite on a short budget
 ```
 
@@ -492,18 +648,49 @@ doubles and the run starts moving. At `initk 7` the verdicts are still plentiful
 *wrong*, and the assignment gets refuted by plain propagation in seconds. `mink 32` — the old
 default — suppresses the layer at every `initk`.
 
-Then the solve rate at the shipping configuration (`--attempts 5`, 120 s, six seeds):
+**Read those `mink` numbers as lane words.** The grid was measured when the threshold counted
+64-bit lane words with a survivor in them; the threshold counts *samples* now, and it counts
+nothing else — the unit is fixed in `signatureOutcome` and stated on the option. The default is
+therefore `640`, which is the ten lane words the grid picked, not the bare `10` that number
+would be read as under the new unit.
+
+The difference between those two readings is the whole parameter. Ten samples is no threshold
+at all: a variable that is constant across n samples is constant by chance with probability
+`2^-(n-1)`, so on a 24 765-variable formula, eleven surviving lanes leave around two dozen
+variables looking implied for no reason whatsoever, every probe. At 640 the same calculation
+gives none. It shows in the bail count — on 17-round SHA-256 the layer bailed 8 times in a
+30 s run at `--mink 10` and about 45 000 times at `--mink 640`, out of the same probe budget.
+Those 45 000 are probes that were producing noise before and now fall back to plain
+propagation.
+
+Fixing the unit in samples makes `mink` an *absolute* evidence threshold, which ties it to the
+other two knobs: each of the `initk` filter literals roughly halves the population, so a probe
+has about `siglen * 64 / 2^initk` survivors to show. Keep
+
+```
+siglen * 64  >=  mink * 2^initk
+```
+
+or the layer spends its time bailing and the run is mostly propagation plus CDCL. The defaults
+sit just inside it — `65536` against `640 * 64 = 40960`. Measured on
+`19-xorcircuit-i96-g2500`, dropping to `--siglen 256` without lowering `mink` cuts the verdicts
+from 80 829 to 26 134 and raises the bails from 16 865 to 48 638: not off, but suppressed to
+about a third.
+
+Then the solve rate on 17-round SHA-256 (`--attempts 5`, 120 s, six seeds). **These numbers
+predate the unit fix**, so read every `mink` in them as lane words - the row that won is ten
+words, which is today's `--mink 640`:
 
 | setting | solved | when it did not |
 | --- | --- | --- |
-| `--initk 6 --mink 10` | **2 / 6** (71 s, 99 s) | 38–43 % |
-| `--initk 6 --mink 8` | 0 / 6 | 34–50 % |
-| `--initk 8 --mink 32` (old default) | 0 / 6 | 39–45 % |
+| `--initk 6 --mink 10` words, i.e. `--mink 640` today | **2 / 6** (71 s, 99 s) | 38–43 % |
+| `--initk 6 --mink 8` words | 0 / 6 | 34–50 % |
+| `--initk 8 --mink 32` words (the default before that) | 0 / 6 | 39–45 % |
 
 Two solves out of six is not a significant result on its own, and it is worth being blunt about
-that: the case for the new pair is the grid above, plus the fact that the shipped benchmark suite
-is indifferent to the change (20 of 26 either way). What the numbers do rule out is the old
-default, which never once broke the wall.
+that: the case for the winning pair is the grid above, plus the fact that the shipped benchmark
+suite is indifferent to the change (21 of 26 either way). What the numbers do rule out is the
+oldest default, which never once broke the wall.
 
 Note also what was *not* the lever. Across those runs the CDCL phase proved anywhere between 0
 and 267 literals with no relation to whether the run finished, while `resamples` sat at 22–56
@@ -582,6 +769,8 @@ The summary after every run is meant to be read as a diagnosis.
 | Restarts early and often | Statistical verdicts are firing on biased variables | Raise `--siglen`, or start from a lower `--initk` |
 | Progress stalls, `cdcl` phases climbing | Nothing left for the probes to find; the run is riding on the CDCL phase | Raise `--probe-vars` to 2, or lower `--stall-limit` |
 | `cdcl` shows many conflicts and no literals proved | The formula is out of reach of unit learning under this assignment | Raise `--cdcl-conflicts`, or lower `--stall-limit` so phases start sooner |
+| Sampling takes most of the run, phase stuck on `focusing` | The target bits cost `2^n` redraws each and the budget cannot pay for them | Lower `--focus`, or set it to `0` |
+| `focus` reports far fewer lanes than `--siglen` allows | The rejection loop ran out of time and the lanes that never landed were struck out | Lower `--focus`, or raise `--timeout` |
 | Out of memory | The table is `numVars * sigLen * 8` bytes, twice that while a propagated population is being built | Lower `--siglen` |
 | `circuit` reports unexplained clauses on an instance that is a circuit | Some clauses fall outside the three gate patterns, so the population is propagated instead of executed | Nothing to turn; sampling is slower but the result is the same |
 

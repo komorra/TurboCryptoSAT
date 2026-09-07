@@ -20,8 +20,21 @@ struct Options {
     int sigLen = 1024;           // 64-bit lanes per variable (1024 -> 65536 samples)
     int initk = 6;               // literals taken from the current assignment per probe;
                                  // halved on every restart
-    int mink = 10;               // minimum surviving sample words for a signature verdict
+    // Minimum surviving samples for a signature verdict, counted in SAMPLES -
+    // individual lanes, the popcount of the surviving lane words - and never in
+    // 64-bit words. 640 is ten full lane words, which is what the tuning grid
+    // behind this default actually measured; ten *samples* is no threshold at
+    // all, since on a formula with 24k variables a dozen lanes leave a couple of
+    // dozen variables looking constant by chance alone.
+    int mink = 640;
     int probeVars = 1;           // variables probed at once (2^probeVars combinations)
+
+    // How many bits of the target valuation the sample population has to
+    // reproduce. 0 leaves the samples free executions of the circuit, which is
+    // what the filtering step assumes; anything higher narrows the population
+    // to the neighbourhood of the solution by redrawing lanes that miss those
+    // bits, at a cost of roughly 2^focusBits redraws per lane.
+    int focusBits = 8;
 
     std::vector<int> outputs;    // DIMACS literals pinning the target valuation
     bool outputsGiven = false;
@@ -44,6 +57,12 @@ struct Options {
     // budget is per phase and doubles whenever a phase proves nothing.
     bool cdcl = true;
     uint64_t cdclConflicts = 10000;  // 0 -> bounded only by --timeout
+
+    // Linear reasoning over the parity constraints recovered from the clauses.
+    // The root pass contributes derived binary clauses to the formula the search
+    // runs on; later passes contribute proven units. See gf2.h.
+    bool gf2 = true;
+    int gf2Interval = 16;            // new assignments between elimination passes
 
     // Tuning mode: search for the parameters that suit an instance family,
     // validated against a known solution. See tune.h.

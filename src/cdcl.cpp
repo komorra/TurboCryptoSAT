@@ -50,6 +50,9 @@ bool Cdcl::attach(const Cnf& cnf, uint64_t seed) {
     clauseInc_ = 1.0f;
     lbdCounter_ = 0;
     unsat_ = false;
+    restart_ = 0;
+    conflictsThisRestart_ = 0;
+    budgetToRestart_ = luby(2.0, 0) * 100.0;
 
     heap_.clear();
     heap_.reserve(nv);
@@ -201,7 +204,14 @@ void Cdcl::analyze(CRef confl, std::vector<Lit>& outLearnt, int& outBtLevel, uin
 
     do {
         const uint32_t sz = clauseSize(confl);
-        if (clauseLearnt(confl)) setClauseAct(confl, clauseAct(confl) + clauseInc_);
+        if (clauseLearnt(confl)) {
+            setClauseAct(confl, clauseAct(confl) + clauseInc_);
+            // LBD measured when the clause was learned describes the search
+            // state at that moment. A clause that spans fewer levels now is
+            // more glue than it looked, and reduceDb() should treat it so.
+            const uint32_t lbd = computeLbd(clauseLits(confl), sz);
+            if (lbd < clauseLbd(confl)) setClauseLbd(confl, lbd);
+        }
         const Lit* c = clauseLits(confl);
         for (uint32_t k = (p < 0 ? 0u : 1u); k < sz; ++k) {
             const Lit q = c[k];
@@ -267,17 +277,17 @@ bool Cdcl::litRedundant(Lit l) {
     return true;
 }
 
-uint32_t Cdcl::computeLbd(const std::vector<Lit>& lits) {
+uint32_t Cdcl::computeLbd(const Lit* lits, uint32_t n) {
     ++lbdCounter_;
-    uint32_t n = 0;
-    for (Lit l : lits) {
-        const size_t lv = static_cast<size_t>(level_[static_cast<size_t>(litVar(l))]);
+    uint32_t d = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        const size_t lv = static_cast<size_t>(level_[static_cast<size_t>(litVar(lits[i]))]);
         if (lv < lbdStamp_.size() && lbdStamp_[lv] != lbdCounter_) {
             lbdStamp_[lv] = lbdCounter_;
-            ++n;
+            ++d;
         }
     }
-    return n ? n : 1;
+    return d ? d : 1;
 }
 
 Lit Cdcl::pickBranchLit() {
@@ -307,7 +317,16 @@ void Cdcl::reduceDb() {
         return clauseAct(a) < clauseAct(b);
     });
 
-    const size_t drop = learnts_.size() / 2;
+    // Half the database goes, worst first - except that a clause spanning two
+    // decision levels or fewer is kept whatever else happens. Glue clauses are
+    // the ones that tie distant parts of the circuit together, they are cheap
+    // to keep, and re-deriving one costs far more than the slot it occupies.
+    size_t drop = learnts_.size() / 2;
+    while (drop > 0 && clauseLbd(learnts_[drop - 1]) <= 2) --drop;
+    // Nothing to drop: the rebuild below would copy the whole arena onto itself.
+    // The caller raises maxLearnts_ afterwards either way, so the database is
+    // simply allowed to grow until there is something worth reclaiming.
+    if (drop == 0) return;
 
     std::vector<uint32_t> next;
     next.reserve(arena_.size());
@@ -356,15 +375,12 @@ CdclResult Cdcl::run(uint64_t maxConflicts, const std::function<bool()>& cancell
 
     const size_t rootStart = trail_.size();
     const uint64_t conflictsStart = conflicts_;
-    int restart = 0;
-    double budgetToRestart = luby(2.0, restart) * 100.0;
-    uint64_t conflictsThisRestart = 0;
 
     for (;;) {
         const CRef confl = propagate();
         if (confl != kNoRef) {
             ++conflicts_;
-            ++conflictsThisRestart;
+            ++conflictsThisRestart_;
             if (decisionLevel() == 0) {
                 unsat_ = true;
                 return CdclResult::RootConflict;
@@ -404,9 +420,9 @@ CdclResult Cdcl::run(uint64_t maxConflicts, const std::function<bool()>& cancell
             cancelUntil(0);
             return CdclResult::Budget;
         }
-        if (static_cast<double>(conflictsThisRestart) >= budgetToRestart) {
-            conflictsThisRestart = 0;
-            budgetToRestart = luby(2.0, ++restart) * 100.0;
+        if (static_cast<double>(conflictsThisRestart_) >= budgetToRestart_) {
+            conflictsThisRestart_ = 0;
+            budgetToRestart_ = luby(2.0, ++restart_) * 100.0;
             cancelUntil(0);
             if (static_cast<double>(learnts_.size()) >= maxLearnts_) {
                 reduceDb();
@@ -422,6 +438,10 @@ CdclResult Cdcl::run(uint64_t maxConflicts, const std::function<bool()>& cancell
                 const int8_t x = assigns_[static_cast<size_t>(v)];
                 model_[static_cast<size_t>(v)] = x != 0 ? x : static_cast<int8_t>(1);
             }
+            // The model is copied out, so the trail it was read from can go:
+            // every exit from run() leaves the search at level 0, which is what
+            // makes rootTrail() meaningful to the caller in every case.
+            cancelUntil(0);
             return CdclResult::Solved;
         }
         trailLim_.push_back(trail_.size());

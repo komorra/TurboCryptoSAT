@@ -1,4 +1,5 @@
-// Colored ASCII dashboard: a stable map of clause satisfaction on the left and
+// Colored ASCII dashboard: a map of the variables on the left, each cell
+// colored by how satisfied the clauses its variables occur in already are, and
 // a live status panel on the right, both sized to the current terminal.
 //
 // Rendering rules that keep legacy consoles (cmd.exe / conhost) happy:
@@ -50,6 +51,9 @@ struct UiModel {
     int sigLen = 0;
     int initk = 0;
     int mink = 0;
+    int focusBits = 0;             // target bits the population must reproduce
+    uint64_t focusLanes = 0;       // lanes that already do
+    uint64_t focusRounds = 0;      // redraws the rejection loop has spent
     uint64_t validSamples = 0;
     uint64_t totalSamples = 0;
     uint64_t sigBytes = 0;
@@ -63,11 +67,6 @@ struct UiModel {
 
 class Ui {
 public:
-    // Computes the fixed clause display order. Clauses are ranked by length and
-    // then by their smallest variable, so a cell always shows the same clauses
-    // for the whole run.
-    void prepare(const Cnf& cnf);
-
     void begin();
     void end();
     void render(const UiModel& m);
@@ -104,7 +103,6 @@ private:
     bool tty_ = false;
     int lastCols_ = -1;
     int lastRows_ = -1;
-    std::vector<uint32_t> order_;    // display rank -> clause index
     std::vector<Line> map_;          // left pane rows
     std::vector<Line> status_;       // right pane rows
     std::vector<Line> lines_;        // the whole frame, one entry per row

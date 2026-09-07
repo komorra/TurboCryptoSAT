@@ -9,6 +9,10 @@
 #include <string>
 #include <vector>
 
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
+
 namespace tcs {
 
 using Lit = int32_t;
@@ -31,6 +35,35 @@ inline Var litVar(Lit l) { return l >> 1; }
 inline bool litSign(Lit l) { return (l & 1) != 0; }  // true when negated
 inline Lit litNeg(Lit l) { return l ^ 1; }
 inline Lit mkLit(Var v, bool negated) { return (v << 1) | (negated ? 1 : 0); }
+
+// Set bits in a 64-bit lane word. Both the sample generator and the solver's
+// survivor count run over whole populations, so this sits here rather than
+// being duplicated per translation unit.
+inline uint64_t popcount64(uint64_t x) {
+#if defined(__GNUC__) || defined(__clang__)
+    return static_cast<uint64_t>(__builtin_popcountll(x));
+#else
+    x = x - ((x >> 1) & 0x5555555555555555ull);
+    x = (x & 0x3333333333333333ull) + ((x >> 2) & 0x3333333333333333ull);
+    x = (x + (x >> 4)) & 0x0F0F0F0F0F0F0F0Full;
+    return (x * 0x0101010101010101ull) >> 56;
+#endif
+}
+
+// Index of the lowest set bit. Undefined for zero, like the intrinsics it wraps.
+inline uint32_t ctz64(uint64_t x) {
+#if defined(__GNUC__) || defined(__clang__)
+    return static_cast<uint32_t>(__builtin_ctzll(x));
+#elif defined(_MSC_VER)
+    unsigned long i = 0;
+    _BitScanForward64(&i, x);
+    return static_cast<uint32_t>(i);
+#else
+    uint32_t n = 0;
+    while (!(x & 1ull)) { x >>= 1; ++n; }
+    return n;
+#endif
+}
 
 // Clauses are stored in one flat literal pool with an index of start offsets,
 // which keeps them contiguous in memory and free of per-clause allocations.

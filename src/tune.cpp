@@ -263,17 +263,18 @@ void buildAxes(const std::string& preset, std::vector<Axis>& axes, bool& ok) {
     // layer speaks at all, the rest only shade it.
     if (preset == "quick") {
         axes.push_back({"initk", {4, 5, 6, 7, 8}, nullptr, &Params::initk});
-        axes.push_back({"mink", {8, 10, 16, 32}, nullptr, &Params::mink});
+        axes.push_back({"mink", {512, 640, 1024, 2048}, nullptr, &Params::mink});
         axes.push_back({"siglen", {512, 1024, 2048}, nullptr, &Params::sigLen});
     } else if (preset == "balanced") {
         axes.push_back({"initk", {3, 4, 5, 6, 7, 8, 9, 10}, nullptr, &Params::initk});
-        axes.push_back({"mink", {4, 8, 10, 16, 24, 32, 64}, nullptr, &Params::mink});
+        axes.push_back({"mink", {256, 512, 640, 1024, 1536, 2048, 4096}, nullptr, &Params::mink});
         axes.push_back({"siglen", {256, 512, 1024, 2048}, nullptr, &Params::sigLen});
         axes.push_back({"stall-limit", {250, 1000, 4000}, &Params::stallLimit, nullptr});
         axes.push_back({"probe-vars", {1, 2}, nullptr, &Params::probeVars});
     } else if (preset == "thorough") {
         axes.push_back({"initk", {2, 3, 4, 5, 6, 7, 8, 9, 10, 12}, nullptr, &Params::initk});
-        axes.push_back({"mink", {2, 4, 8, 10, 12, 16, 24, 32, 48, 64}, nullptr, &Params::mink});
+        axes.push_back({"mink", {128, 256, 512, 640, 768, 1024, 1536, 2048, 3072, 4096},
+                        nullptr, &Params::mink});
         axes.push_back({"siglen", {256, 512, 1024, 2048, 4096}, nullptr, &Params::sigLen});
         axes.push_back({"stall-limit", {100, 250, 1000, 4000, 16000},
                         &Params::stallLimit, nullptr});

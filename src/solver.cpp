@@ -54,7 +54,7 @@ struct Solver::Worker {
 };
 
 Solver::Solver(const Cnf& cnf, const Options& opt)
-    : cnf_(cnf), opt_(opt), rng_(opt.seed) {}
+    : cnf_(cnf), search_(&cnf), opt_(opt), rng_(opt.seed) {}
 
 Solver::~Solver() = default;
 
@@ -69,11 +69,19 @@ void Solver::tick(const char* phase) {
 // Picks the variables that drive the sample population.
 //
 // A user supplied range wins. Otherwise a single scalar pass plays the role of
-// the sampler: variables are walked in index order and every one that is still
-// undetermined is decided, the rest falling out by propagation. What remains is
-// a dependency set - for a Tseitin encoded circuit exactly its inputs - and
-// letting the bit parallel generator assign the whole set at once saves it one
-// full propagation sweep per input.
+// the sampler: variables are walked and every one that is still undetermined is
+// decided, the rest falling out by propagation. What remains is a dependency
+// set - for a Tseitin encoded circuit exactly its inputs - and letting the bit
+// parallel generator assign the whole set at once saves it one full propagation
+// sweep per input.
+//
+// The order that pass walks in decides what it finds. Index order alone adopts
+// whichever variable of a dependency it meets first, so a gate output numbered
+// ahead of its own inputs is taken for an input and the real ones then fall out
+// of it by propagation - a driving set the same size but not the circuit's.
+// When the gate network was recovered its free variables are the answer by
+// construction, so they go first and the index scan only fills in whatever the
+// residual clauses leave undetermined.
 void Solver::detectInputs() {
     inputVars_.clear();
     if (opt_.inputsGiven) {
@@ -89,19 +97,24 @@ void Solver::detectInputs() {
     for (Lit l : sampleFixed_) probe.enqueue(l);
     probe.propagate();
 
-    for (Var v = 0; v < sampleCnf_.numVars; ++v) {
-        if (probe.assigned(v)) continue;
+    auto adopt = [&](Var v) {
+        if (probe.assigned(v)) return;
         inputVars_.push_back(v);
         const size_t m = probe.mark();
         const bool pick = rng_.coin();
-        if (probe.enqueue(mkLit(v, pick)) && probe.propagate()) continue;
+        if (probe.enqueue(mkLit(v, pick)) && probe.propagate()) return;
         probe.undoTo(m);
-        if (probe.enqueue(mkLit(v, !pick)) && probe.propagate()) continue;
+        if (probe.enqueue(mkLit(v, !pick)) && probe.propagate()) return;
         // Both polarities fail here; the lane will be retried by the generator.
         probe.undoTo(m);
         probe.enqueue(mkLit(v, pick));
         probe.propagate();
+    };
+
+    if (gateNet_.complete()) {
+        for (Var v : gateNet_.freeVars) adopt(v);
     }
+    for (Var v = 0; v < sampleCnf_.numVars; ++v) adopt(v);
 }
 
 int Solver::workerThreads() const {
@@ -116,7 +129,7 @@ PrepareResult Solver::prepareBase(std::string& error) {
         error = "the formula contains an empty clause";
         return PrepareResult::Unsat;
     }
-    master_.attach(cnf_);
+    master_.attach(searchCnf());
 
     // Variables that occur in no clause at all. DIMACS files that declare fewer
     // variables than their largest index leave gaps like this, and the loader
@@ -180,6 +193,163 @@ PrepareResult Solver::prepareBase(std::string& error) {
     return PrepareResult::Ok;
 }
 
+// Linear reasoning over the parity constraints, run once against the base
+// assignment before anything else starts.
+//
+// Two kinds of thing come out, and they are used differently. A row that
+// reduces to a single variable is a proven literal and goes straight onto the
+// trail. A row that reduces to two is an equivalence, and those are folded into
+// the formula the search runs on as a pair of binary clauses each - which is
+// the point of doing this at all. They are consequences of the original
+// clauses, so a model of the augmented formula is a model of the file, and
+// `verify()` still checks against the file either way.
+//
+// The sample population is deliberately left reading `cnf_`: the derived
+// clauses are not part of any gate, so adding them to `sampleCnf_` would leave
+// residual clauses behind and cost the fast sampler for nothing.
+PrepareResult Solver::prepareGf2(std::string& error) {
+    if (!opt_.gf2) return PrepareResult::Ok;
+
+    gf2_.build(cnf_);
+    stats_.gf2Equations = gf2_.equationCount();
+    stats_.gf2Vars = gf2_.varCount();
+    if (gf2_.empty()) return PrepareResult::Ok;
+
+    const uint64_t t0 = nowNs();
+    ++stats_.gf2Runs;
+    gf2_.solve(master_.values(), gf2Res_);
+    stats_.gf2Seconds += static_cast<double>(nowNs() - t0) * 1e-9;
+    gf2LastAssigned_ = master_.assignedCount();
+
+    if (gf2Res_.conflict) {
+        ++stats_.gf2Conflicts;
+        error = "the parity constraints contradict the unit clauses";
+        return PrepareResult::Unsat;
+    }
+
+    stats_.gf2Equivs = gf2Res_.equivA.size();
+    if (!gf2Res_.equivA.empty()) {
+        // `a` and `b` stand or fall together: a -> b and b -> a, one binary
+        // clause each.
+        //
+        // Most of them are not worth writing down. On a Tseitin encoded round
+        // function the parities are already cut into three variable gates whose
+        // intermediates propagation can reach anyway, so the overwhelming
+        // majority of what elimination derives is something unit propagation
+        // would have produced on its own - 712 of 715 on a 17 round SHA-256
+        // preimage. Adding those costs every probe a bigger formula to
+        // propagate over and buys nothing, so each clause is checked against
+        // propagation first and only the ones it cannot reach are kept.
+        Propagator probe;
+        probe.attach(cnf_);
+        for (Lit l : master_.trail()) probe.enqueue(l);
+        probe.propagate();
+        const size_t probeBase = probe.mark();
+        // A clause (x | y) is redundant when propagating ~x already yields y,
+        // or propagating ~y already yields x. Propagation is not closed under
+        // contraposition, so both directions have to be tried.
+        auto reachable = [&](Lit x, Lit y) {
+            bool got = true;  // a refuted premise makes the clause vacuous here
+            if (probe.enqueue(litNeg(x)) && probe.propagate()) got = probe.litValue(y) == 1;
+            probe.undoTo(probeBase);
+            if (got) return true;
+            got = true;
+            if (probe.enqueue(litNeg(y)) && probe.propagate()) got = probe.litValue(x) == 1;
+            probe.undoTo(probeBase);
+            return got;
+        };
+
+        std::vector<Lit> keep;
+        for (size_t i = 0; i < gf2Res_.equivA.size(); ++i) {
+            const Lit a = gf2Res_.equivA[i], b = gf2Res_.equivB[i];
+            if (!reachable(litNeg(a), b)) { keep.push_back(litNeg(a)); keep.push_back(b); }
+            if (!reachable(a, litNeg(b))) { keep.push_back(a); keep.push_back(litNeg(b)); }
+        }
+        stats_.gf2Clauses = keep.size() / 2;
+
+        if (!keep.empty()) {
+            augmented_ = cnf_;
+            for (size_t i = 0; i < keep.size(); i += 2) {
+                augmented_.lits.push_back(keep[i]);
+                augmented_.lits.push_back(keep[i + 1]);
+                augmented_.start.push_back(static_cast<uint32_t>(augmented_.lits.size()));
+            }
+            if (augmented_.maxClauseLen < 2) augmented_.maxClauseLen = 2;
+            augmented_.buildOccurrences();
+
+            // Re-attach and replay. The trail is already the propagation
+            // closure of everything pinned so far, so pushing it back literal
+            // by literal restores exactly the same state - and then propagates
+            // further, since the formula now says more.
+            const std::vector<Lit> saved = master_.trail();
+            search_ = &augmented_;
+            master_.attach(searchCnf());
+            for (Lit l : saved) {
+                if (!master_.enqueue(l)) {
+                    error = "the derived parity clauses contradict the unit clauses";
+                    return PrepareResult::Unsat;
+                }
+            }
+            if (!master_.propagate()) {
+                error = "propagating the derived parity clauses conflicts";
+                return PrepareResult::Unsat;
+            }
+        }
+    }
+
+    for (Lit l : gf2Res_.units) {
+        if (master_.litValue(l) == 1) continue;
+        ++stats_.gf2Units;
+        if (!master_.enqueue(l)) {
+            error = "the parity constraints contradict the unit clauses";
+            return PrepareResult::Unsat;
+        }
+    }
+    if (!master_.propagate()) {
+        error = "propagating the proven parity literals conflicts";
+        return PrepareResult::Unsat;
+    }
+    return PrepareResult::Ok;
+}
+
+// One elimination pass over the assignment as it now stands.
+//
+// Every literal it returns follows from the formula and that assignment, the
+// same standing as anything the CDCL phase hands back - so this contributes no
+// bets. It is cheap enough (single-digit milliseconds even on the SHA-256
+// instances) to run whenever the assignment has moved a little.
+bool Solver::runGf2(SolveStatus& status, bool& progress) {
+    progress = false;
+    if (!opt_.gf2 || gf2_.empty()) return true;
+
+    const uint64_t t0 = nowNs();
+    ++stats_.gf2Runs;
+    gf2_.solve(master_.values(), gf2Res_);
+    stats_.gf2Seconds += static_cast<double>(nowNs() - t0) * 1e-9;
+    gf2LastAssigned_ = master_.assignedCount();
+
+    if (gf2Res_.conflict) {
+        ++stats_.gf2Conflicts;
+        status = SolveStatus::Exhausted;
+        return false;
+    }
+
+    gf2New_.clear();
+    for (Lit l : gf2Res_.units) {
+        if (master_.litValue(l) != 1) gf2New_.push_back(l);
+    }
+    if (gf2New_.empty()) return true;
+
+    stats_.gf2Units += gf2New_.size();
+    bool conflict = false;
+    progress = applyLiterals(gf2New_, conflict);
+    if (conflict) {
+        status = SolveStatus::Exhausted;
+        return false;
+    }
+    return true;
+}
+
 void Solver::buildSampleCnf() {
     sampleCnf_ = Cnf();
     sampleCnf_.numVars = cnf_.numVars;
@@ -223,6 +393,26 @@ bool Solver::buildSignatures(std::string& error) {
     cfg.threads = workerThreads();
     cfg.maxRounds = opt_.sampleRounds;
     cfg.gates = &gateNet_;
+    // The bits of the target valuation the population has to reproduce, taken
+    // as a prefix of it: the target literals come in file order, so a prefix is
+    // a stable, reproducible choice rather than a fresh subset per redraw, and
+    // the population then keeps the same shape across the whole run.
+    //
+    // Nothing here is inference. Constraining the samples does not commit the
+    // solver to anything - it narrows the population the statistical layer bets
+    // from, and every bet is still checked the way it always was.
+    {
+        const size_t n = std::min(static_cast<size_t>(std::max(0, opt_.focusBits)),
+                                  targetLits_.size());
+        cfg.focusLits.assign(targetLits_.begin(), targetLits_.begin() + static_cast<long>(n));
+        stats_.focusBits = n;
+    }
+    cfg.focusProgress = [this](uint64_t ok, uint64_t total, uint64_t rounds) {
+        stats_.focusLanes = ok;
+        stats_.totalSamples = total;
+        stats_.focusRounds = rounds;
+        tick("focusing");
+    };
     cfg.cancelled = [this] {
         if (interruptRequested()) return true;
         return opt_.timeout > 0.0 &&
@@ -234,6 +424,8 @@ bool Solver::buildSignatures(std::string& error) {
     stats_.sampleSeconds += lastSampleSeconds_;
     stats_.validSamples = sig_.validSamples();
     stats_.totalSamples = sig_.sampleCount();
+    stats_.focusLanes = sig_.focusLanes();
+    stats_.focusRounds = sig_.focusRounds();
     stats_.signatureBytes = sig_.memoryBytes();
     stats_.gateSampling = sig_.gateSampling();
     // Reported even when the fast path was not taken: a network that explains
@@ -291,17 +483,27 @@ void Solver::signatureOutcome(Worker& w, const std::vector<Lit>& forced, std::ve
 
     w.keepIdx.clear();
     w.keepVal.clear();
+    uint64_t survivingSamples = 0;  // lanes, i.e. samples - never lane words
     for (int i = 0; i < words; ++i) {
         const uint64_t k = w.keep[static_cast<size_t>(i)];
         if (k) {
             w.keepIdx.push_back(static_cast<uint32_t>(i));
             w.keepVal.push_back(k);
+            survivingSamples += popcount64(k);
         }
     }
 
     // Too few surviving samples: any verdict would be noise, so fall back to
     // what plain propagation already knows.
-    if (static_cast<int>(w.keepIdx.size()) <= opt_.mink) {
+    //
+    // `mink` is in SAMPLES. That is the only reading that makes the threshold
+    // mean anything, and it is why the default is 640 rather than 10: a
+    // variable that is constant across n samples is constant by chance with
+    // probability 2^-(n-1), so with 24k variables to test, n = 11 hands back
+    // around two dozen invented implications per probe while n = 640 hands
+    // back none. Counting lane words instead would put the same number on a
+    // wildly different amount of evidence depending on --siglen.
+    if (survivingSamples <= static_cast<uint64_t>(opt_.mink)) {
         ++w.sigBails;
         out.assign(forced.begin(), forced.end());
         return;
@@ -527,7 +729,7 @@ bool Solver::runCdclPhase(SolveStatus& status, bool& progress) {
 
     if (!cdcl_) {
         cdcl_.reset(new Cdcl());
-        if (!cdcl_->attach(cnf_, rng_.next())) {
+        if (!cdcl_->attach(searchCnf(), rng_.next())) {
             status = SolveStatus::Exhausted;
             return false;
         }
@@ -537,14 +739,39 @@ bool Solver::runCdclPhase(SolveStatus& status, bool& progress) {
     }
 
     // Pin everything the signature loop has committed since the last phase.
-    const std::vector<Lit>& mt = master_.trail();
-    for (; cdclFedFromMaster_ < mt.size(); ++cdclFedFromMaster_) {
-        if (!cdcl_->addRoot(mt[cdclFedFromMaster_])) {
-            status = SolveStatus::Exhausted;  // the assignment is refuted
+    //
+    // addRoot() propagates, and the learned clauses carried over from earlier
+    // phases can turn a freshly pinned literal into further level 0 units. Those
+    // are proven the same way anything run() returns is, so they are read off
+    // the root trail here and applied - and applying them can extend master_'s
+    // trail again, which is why this loops until neither side has anything new.
+    for (;;) {
+        const std::vector<Lit>& mt = master_.trail();
+        if (cdclFedFromMaster_ >= mt.size()) break;
+        for (; cdclFedFromMaster_ < mt.size(); ++cdclFedFromMaster_) {
+            if (!cdcl_->addRoot(mt[cdclFedFromMaster_])) {
+                status = SolveStatus::Exhausted;  // the assignment is refuted
+                return false;
+            }
+        }
+        // Most of the root trail delta is the literals just fed in; what is
+        // left is what the learned clauses derived from them.
+        cdclNew_.clear();
+        const std::vector<Lit>& rt = cdcl_->rootTrail();
+        for (size_t i = cdclRootSeen_; i < rt.size(); ++i) {
+            if (master_.litValue(rt[i]) != 1) cdclNew_.push_back(rt[i]);
+        }
+        cdclRootSeen_ = rt.size();
+        if (cdclNew_.empty()) break;
+        stats_.cdclImplied += cdclNew_.size();
+        bool conflict = false;
+        if (applyLiterals(cdclNew_, conflict)) progress = true;
+        if (conflict) {
+            status = SolveStatus::Exhausted;
             return false;
         }
+        if (oracleTripped_) return true;
     }
-    cdclRootSeen_ = std::max(cdclRootSeen_, cdcl_->rootTrail().size());
 
     ++stats_.cdclPhases;
     tick("cdcl");
@@ -668,6 +895,8 @@ bool Solver::attempt(SolveStatus& status) {
     long long stall = 0;
     int resamplesSinceProgress = 0;
     const int kResampleAttempts = 2;
+    // A restart retracts the trail, so the last pass's cursor means nothing.
+    gf2LastAssigned_ = 0;
 
     // The "direct" pass of the reference implementation: ask the samples what
     // the current assignment alone already determines.
@@ -728,11 +957,34 @@ bool Solver::attempt(SolveStatus& status) {
             return false;
         }
 
+        // The probes have moved the assignment; the parity system may now say
+        // something it could not before. Each pass costs milliseconds, so it is
+        // run on a stride rather than every round.
+        if (opt_.gf2 && !gf2_.empty() &&
+            master_.assignedCount() >=
+                gf2LastAssigned_ + static_cast<size_t>(std::max(1, opt_.gf2Interval))) {
+            bool gf2Progress = false;
+            if (!runGf2(status, gf2Progress)) return false;
+            if (gf2Progress) grew = true;
+        }
+
         if (grew) {
             stall = 0;
             resamplesSinceProgress = 0;
         } else if (++stall > stallLimit) {
             stall = 0;
+            // A plateau is the one moment worth spending an elimination pass on
+            // unconditionally: it is the cheapest thing that can still prove
+            // something, and it comes before both the redraw and the search.
+            {
+                bool gf2Progress = false;
+                if (!runGf2(status, gf2Progress)) return false;
+                if (gf2Progress) {
+                    resamplesSinceProgress = 0;
+                    tick("solving");
+                    continue;
+                }
+            }
             // A plateau means the probes have stopped finding agreement. Fresh
             // randomness is the cheapest response, so redraw the sample
             // population first and only fall through to a CDCL phase once a new
@@ -807,6 +1059,23 @@ SolveResult Solver::solve() {
             res.message = error;
             return res;
     }
+    // Before anything reads the formula: recover the parity constraints and
+    // reduce them. This can widen the base assignment and can add clauses to
+    // what the search runs on, so it has to happen before master_'s trail is
+    // taken as the base and before the workers attach.
+    switch (prepareGf2(error)) {
+        case PrepareResult::Ok:
+            break;
+        case PrepareResult::Unsat:
+            res.status = SolveStatus::Unsatisfiable;
+            res.message = error;
+            return res;
+        case PrepareResult::InvalidInput:
+            res.status = SolveStatus::Error;
+            res.message = error;
+            return res;
+    }
+
     buildSampleCnf();
     // Reading the gates back is linear in the formula and pays for itself many
     // times over: a circuit is executed once per population instead of being
@@ -827,7 +1096,7 @@ SolveResult Solver::solve() {
     workers_.reserve(static_cast<size_t>(pool_->size()));
     for (int i = 0; i < pool_->size(); ++i) {
         std::unique_ptr<Worker> w(new Worker());
-        w->prop.attach(cnf_);
+        w->prop.attach(searchCnf());
         w->rng.reseed(rng_.next());
         w->stamp.assign(static_cast<size_t>(cnf_.numVars), 0);
         w->stampPol.assign(static_cast<size_t>(cnf_.numVars), 0);

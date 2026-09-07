@@ -110,7 +110,13 @@ private:
     bool litRedundant(Lit l);
     Lit pickBranchLit();
     void reduceDb();
-    uint32_t computeLbd(const std::vector<Lit>& lits);
+    uint32_t computeLbd(const Lit* lits, uint32_t n);
+    uint32_t computeLbd(const std::vector<Lit>& lits) {
+        return computeLbd(lits.data(), static_cast<uint32_t>(lits.size()));
+    }
+    void setClauseLbd(CRef c, uint32_t lbd) {
+        arena_[c + 1] = (arena_[c + 1] & 0x80000000u) | (lbd & 0x7FFFFFFFu);
+    }
 
     // Variable activity, kept in a binary heap so the decision is O(1) to read
     // and O(log n) to maintain.
@@ -156,6 +162,14 @@ private:
     uint64_t conflicts_ = 0;
     double maxLearnts_ = 0.0;
     bool unsat_ = false;
+
+    // Restart state. Phases are bounded and frequent, and the learned clauses
+    // outlive them, so the schedule has to as well: restarting the Luby
+    // sequence per run() would replay its short prefix over and over and never
+    // give the search one of the long runs a hard instance needs.
+    int restart_ = 0;
+    uint64_t conflictsThisRestart_ = 0;
+    double budgetToRestart_ = 0.0;
 };
 
 }  // namespace tcs

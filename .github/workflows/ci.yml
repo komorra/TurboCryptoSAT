@@ -45,6 +45,14 @@ jobs:
         run: |
           "$TCS_BIN" --version
 
+      # Randomised property tests over the CDCL contract and the propagator's
+      # undo. These fail by losing inference rather than by answering wrongly,
+      # so nothing below would catch a regression in them.
+      - name: Property tests
+        shell: bash
+        run: |
+          "$TCS_BIN" selftest 100000
+
       # The suite is generated from fixed seeds, so a differing file count here
       # would mean the generator stopped being deterministic.
       - name: Regenerate the benchmark suite

@@ -12,17 +12,6 @@
 namespace tcs {
 namespace {
 
-inline uint64_t popcount64(uint64_t x) {
-#if defined(__GNUC__) || defined(__clang__)
-    return static_cast<uint64_t>(__builtin_popcountll(x));
-#else
-    x = x - ((x >> 1) & 0x5555555555555555ull);
-    x = (x & 0x3333333333333333ull) + ((x >> 2) & 0x3333333333333333ull);
-    x = (x + (x >> 4)) & 0x0F0F0F0F0F0F0F0Full;
-    return (x * 0x0101010101010101ull) >> 56;
-#endif
-}
-
 // Decides whether the recovered circuit can stand in for propagation, and
 // turns the fixed literals into a per variable value while it is at it.
 //
@@ -61,11 +50,51 @@ bool Signatures::generate(const Cnf& cnf, const std::vector<Lit>& fixedLits,
                           std::string& error) {
     words_ = std::max(1, cfg.words);
     numVars_ = cnf.numVars;
+    focusBits_ = static_cast<int>(cfg.focusLits.size());
+    focusLanes_ = 0;
+    focusRounds_ = 0;
 
     std::vector<int8_t> fixedVals;
     const GateNetwork* net = gateDisabled_ ? nullptr
                                            : usableNetwork(cfg.gates, cnf, fixedLits, fixedVals);
     const size_t cells = static_cast<size_t>(numVars_) * static_cast<size_t>(words_);
+
+    // The target bits split in two by what it costs to honour them. One that
+    // lands on a free variable is not sampled for at all - the variable is
+    // simply not randomised, exactly as a fixed literal is - so only the bits a
+    // gate defines are left to the rejection loop, which is where the 2^n is.
+    std::vector<Lit> focus;
+    if (net && !cfg.focusLits.empty()) {
+        for (Lit l : cfg.focusLits) {
+            const Var v = litVar(l);
+            if (v < 0 || v >= cnf.numVars) continue;
+            if (!net->isFree[static_cast<size_t>(v)]) {
+                focus.push_back(l);
+                continue;
+            }
+            const int8_t want = litSign(l) ? -1 : 1;
+            if (fixedVals[static_cast<size_t>(v)] != 0 &&
+                fixedVals[static_cast<size_t>(v)] != want) {
+                error = "the target bits to focus on contradict the unit clauses";
+                return false;
+            }
+            fixedVals[static_cast<size_t>(v)] = want;
+        }
+    }
+
+    // The propagating generator has no rejection loop. There the target bits go
+    // in as ordinary fixed literals: propagation either extends a lane to
+    // honour them or the lane conflicts and drops out, which reaches the same
+    // population far less efficiently - and, on an instance whose outputs are
+    // this hard to hit, an almost empty one. It is the honest answer rather
+    // than the fast one, and the lane count in the summary shows which it was.
+    std::vector<Lit> propFixed;
+    const std::vector<Lit>* propLits = &fixedLits;
+    if (!cfg.focusLits.empty()) {
+        propFixed = fixedLits;
+        propFixed.insert(propFixed.end(), cfg.focusLits.begin(), cfg.focusLits.end());
+        propLits = &propFixed;
+    }
 
     // The clause check only has to run once. The gate list is the same on every
     // redraw and its execution is lane independent, so a population that came
@@ -112,7 +141,7 @@ bool Signatures::generate(const Cnf& cnf, const std::vector<Lit>& fixedLits,
                 if (useGates) {
                     gateChunk(cnf, *net, fixedVals, b, e, seed, verify, cfg.cancelled, aborted);
                 } else {
-                    generateChunk(cnf, fixedLits, inputVars, cfg.maxRounds, b, e, seed,
+                    generateChunk(cnf, *propLits, inputVars, cfg.maxRounds, b, e, seed,
                                   cfg.cancelled);
                 }
             };
@@ -144,6 +173,19 @@ bool Signatures::generate(const Cnf& cnf, const std::vector<Lit>& fixedLits,
             verify = false;
             if (!runPass(false)) return false;
         }
+    }
+
+    // Narrowing the population onto the target bits comes after the network has
+    // vouched for itself: the loop below redraws lanes through the same gates,
+    // and doing that on a network that turned out not to be the formula would
+    // spend its whole budget chasing a target those lanes cannot reach.
+    if (gateSampling_ && !focus.empty()) {
+        focusPopulation(*net, fixedVals, focus, cfg);
+    } else if (!cfg.focusLits.empty()) {
+        // Either every requested bit landed on a free variable, or the
+        // propagating generator honoured them as fixed literals. A valid lane
+        // reproduces them either way.
+        focusLanes_ = validSamples_;
     }
 
     validSamples_ = 0;
@@ -178,6 +220,174 @@ bool Signatures::generate(const Cnf& cnf, const std::vector<Lit>& fixedLits,
     return true;
 }
 
+// Rejection sampling: redraw the lanes that miss a target bit until none does.
+//
+// This is the whole of the --focus mechanism, and the shape of it is what makes
+// it affordable. A lane that hits the target is finished - its values are
+// masked out of every later redraw - so the population converges lane by lane
+// rather than being thrown away and regenerated whole. Lanes are redrawn in
+// lockstep 64 at a time, which is what keeps the bit parallelism, and a word
+// whose every lane has landed drops out of the loop entirely. The cost is
+// therefore the expected worst of 64 geometric draws per word, around
+// 4.7 * 2^bits redraws of that word, not 2^bits redraws of the population.
+void Signatures::focusPopulation(const GateNetwork& net, const std::vector<int8_t>& fixedVals,
+                                 const std::vector<Lit>& focus, const SignatureConfig& cfg) {
+    focusBad_.assign(static_cast<size_t>(words_), 0);
+    for (Lit l : focus) {
+        const uint64_t* row =
+            sig_.data() + static_cast<size_t>(litVar(l)) * static_cast<size_t>(words_);
+        // A negated literal wants the variable false, so its own row is the
+        // mismatch; a plain one wants it true, and the complement is.
+        const bool neg = litSign(l) != 0;
+        for (int w = 0; w < words_; ++w) {
+            focusBad_[static_cast<size_t>(w)] |= neg ? row[w] : ~row[w];
+        }
+    }
+    // Lanes that are not samples at all stay out of it: redrawing one would not
+    // make it valid, and counting it would put a floor under the loop that it
+    // could never get past.
+    for (int w = 0; w < words_; ++w) {
+        focusBad_[static_cast<size_t>(w)] &= valid_[static_cast<size_t>(w)];
+    }
+
+    auto missing = [&] {
+        uint64_t n = 0;
+        for (uint64_t x : focusBad_) n += popcount64(x);
+        return n;
+    };
+
+    const uint64_t total = validSamples_;
+    uint64_t bad = missing();
+    if (cfg.focusProgress) cfg.focusProgress(total - bad, total, 0);
+
+    int threads = std::max(1, cfg.threads);
+    threads = std::min(threads, words_);
+    const int per = (words_ + threads - 1) / threads;
+
+    // Redraws are dispatched in batches. One redraw is nowhere near enough work
+    // to pay for launching threads, and running the whole loop inside the
+    // workers would leave the caller - and so the dashboard - with nothing to
+    // show for however long convergence takes.
+    const int kBatch = 32;
+    while (bad > 0) {
+        if (cfg.cancelled && cfg.cancelled()) break;
+
+        std::vector<std::thread> pool;
+        pool.reserve(static_cast<size_t>(threads));
+        for (int t = 0; t < threads; ++t) {
+            const int b = t * per;
+            const int e = std::min(words_, b + per);
+            if (b >= e) break;
+            const uint64_t seed = cfg.seed ^
+                                  (0x9E3779B97F4A7C15ull * static_cast<uint64_t>(t + 1)) ^
+                                  (0xD1B54A32D192ED03ull * (focusRounds_ + 1));
+            auto run = [&, b, e, seed] {
+                focusChunk(net, fixedVals, focus, b, e, seed, kBatch, cfg.cancelled);
+            };
+            if (t + 1 == threads) run();
+            else pool.emplace_back(run);
+        }
+        for (auto& th : pool) th.join();
+
+        focusRounds_ += static_cast<uint64_t>(kBatch);
+        bad = missing();
+        if (cfg.focusProgress) cfg.focusProgress(total - bad, total, focusRounds_);
+    }
+
+    // A lane still missing a bit when the loop ends - interrupted, or out of
+    // time - is not a sample of the focused population and must not be left in
+    // it. Dropping it leaves a smaller but honest population, and the solver
+    // already copes with one that came back thin.
+    for (int w = 0; w < words_; ++w) {
+        valid_[static_cast<size_t>(w)] &= ~focusBad_[static_cast<size_t>(w)];
+    }
+    focusLanes_ = total - bad;
+}
+
+void Signatures::focusChunk(const GateNetwork& net, const std::vector<int8_t>& fixedVals,
+                            const std::vector<Lit>& focus, int wordBegin, int wordEnd,
+                            uint64_t seed, int iterations,
+                            const std::function<bool()>& cancelled) {
+    const int words = words_;
+    const int span = wordEnd - wordBegin;
+    uint64_t* sig = sig_.data();
+    uint64_t* bad = focusBad_.data();
+    Rng rng(seed);
+
+    const uint32_t kPollEvery = 4096;
+    std::vector<int> act;  // words of this range that still miss a bit
+    act.reserve(static_cast<size_t>(span));
+    std::vector<uint64_t> miss(static_cast<size_t>(span), 0);
+
+    for (int it = 0; it < iterations; ++it) {
+        // Walking the finished words out of the inner loops rather than testing
+        // them there matters once most of the population has landed: what is
+        // left is a handful of words, and the gate pass should cost a handful
+        // of words rather than the whole range.
+        act.clear();
+        for (int w = wordBegin; w < wordEnd; ++w) {
+            if (bad[w]) act.push_back(w);
+        }
+        if (act.empty()) return;
+
+        // Only the missing lanes are redrawn. Everything else keeps the values
+        // that already reproduce the target, which is the whole reason this
+        // converges instead of rolling the same dice over and over.
+        for (Var v : net.freeVars) {
+            if (fixedVals[static_cast<size_t>(v)] != 0) continue;
+            uint64_t* row = sig + static_cast<size_t>(v) * static_cast<size_t>(words);
+            for (int w : act) {
+                const uint64_t m = bad[w];
+                row[w] = (row[w] & ~m) | (rng.next() & m);
+            }
+        }
+
+        uint32_t poll = 0;
+        for (const Gate& g : net.gates) {
+            if (++poll == kPollEvery) {
+                poll = 0;
+                // Giving up here leaves the redrawn lanes half executed, which
+                // is harmless: they are still flagged, so the caller strikes
+                // them from the valid mask rather than reading them back.
+                if (cancelled && cancelled()) return;
+            }
+            const uint64_t* a =
+                sig + static_cast<size_t>(litVar(g.in0)) * static_cast<size_t>(words);
+            const uint64_t* b =
+                sig + static_cast<size_t>(litVar(g.in1)) * static_cast<size_t>(words);
+            uint64_t* o = sig + static_cast<size_t>(g.out) * static_cast<size_t>(words);
+            const uint64_t na = litSign(g.in0) ? ~0ull : 0ull;
+            const uint64_t nb = litSign(g.in1) ? ~0ull : 0ull;
+            const uint64_t no = g.negOut ? ~0ull : 0ull;
+            if (g.op == Gate::And) {
+                for (int w : act) {
+                    const uint64_t m = bad[w];
+                    o[w] = (o[w] & ~m) | (((((a[w] ^ na) & (b[w] ^ nb)) ^ no)) & m);
+                }
+            } else {
+                const uint64_t k = na ^ nb ^ no;
+                for (int w : act) {
+                    const uint64_t m = bad[w];
+                    o[w] = (o[w] & ~m) | ((a[w] ^ b[w] ^ k) & m);
+                }
+            }
+        }
+
+        std::fill(miss.begin(), miss.end(), 0);
+        for (Lit l : focus) {
+            const uint64_t* row =
+                sig + static_cast<size_t>(litVar(l)) * static_cast<size_t>(words);
+            const bool neg = litSign(l) != 0;
+            for (int w : act) {
+                miss[static_cast<size_t>(w - wordBegin)] |= neg ? row[w] : ~row[w];
+            }
+        }
+        // A lane only ever leaves the set: one that landed on the target stays
+        // landed, since nothing touches it again.
+        for (int w : act) bad[w] &= miss[static_cast<size_t>(w - wordBegin)];
+    }
+}
+
 void Signatures::disable(int numVars, int words) {
     words_ = std::max(1, words);
     numVars_ = numVars;
@@ -187,6 +397,10 @@ void Signatures::disable(int numVars, int words) {
     probeWords_ = 0;
     validSamples_ = 0;
     gateSampling_ = false;
+    focusBits_ = 0;
+    focusLanes_ = 0;
+    focusRounds_ = 0;
+    std::vector<uint64_t>().swap(focusBad_);
     std::vector<uint64_t>().swap(def_);
 }
 

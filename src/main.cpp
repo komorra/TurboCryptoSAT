@@ -16,6 +16,7 @@
 #include "genbench.h"
 #include "options.h"
 #include "platform.h"
+#include "selftest.h"
 #include "solver.h"
 #include "tune.h"
 #include "ui.h"
@@ -37,6 +38,7 @@ void printUsage() {
         "  turbocryptosat tune <instance.cnf> [solution.cnf] [options]\n"
         "  turbocryptosat tune <directory> [options]\n"
         "  turbocryptosat gen-benchmark <directory>\n"
+        "  turbocryptosat selftest [rounds] [--seed <n>]\n"
         "\n"
         "INSTANCE OPTIONS\n"
         "  --inputs <a-b|auto>   Range of input variables (1-based, inclusive).\n"
@@ -53,8 +55,16 @@ void printUsage() {
         "                        Each one roughly halves the surviving sample set,\n"
         "                        so raising it sharpens the filter but invites\n"
         "                        verdicts drawn from too few samples.\n"
-        "  --mink <n>            Minimum surviving sample words for a verdict. Default 10.\n"
+        "  --mink <n>            Minimum surviving samples for a verdict, counted in\n"
+        "                        samples (lanes), not 64-bit words. Default 640,\n"
+        "                        which is ten full lane words.\n"
         "  --probe-vars <n>      Variables probed at once (2^n branches). Default 1.\n"
+        "  --focus <n>           Bits of the target valuation every sample must\n"
+        "                        reproduce. Lanes that miss one are redrawn until\n"
+        "                        they hit, which narrows the population onto the\n"
+        "                        neighbourhood of the solution at a cost of about\n"
+        "                        2^n redraws. Default 8; 0 leaves the samples free\n"
+        "                        executions of the circuit.\n"
         "  --threads <n>         Worker threads. Default: number of hardware threads.\n"
         "  --attempts <n>        Restarts after a conflict. Default 5.\n"
         "  --stall-limit <n>     Barren rounds before the sample population is\n"
@@ -65,6 +75,12 @@ void printUsage() {
         "                        0 means bounded only by --timeout.\n"
         "  --no-cdcl             Never run a CDCL phase; plateaus are answered by\n"
         "                        resampling and further probing only.\n"
+        "  --no-gf2              Do not recover the XOR constraints or reduce them\n"
+        "                        over GF(2). The parity structure of a hash round\n"
+        "                        function is invisible to plain propagation, so\n"
+        "                        this is on by default.\n"
+        "  --gf2-interval <n>    New assignments between elimination passes.\n"
+        "                        Default 16; a pass also runs at every plateau.\n"
         "  --sample-rounds <n>   Retry rounds while building the samples. Default 12.\n"
         "  --keep-samples        Reuse the sample population across restarts.\n"
         "  --timeout <sec>       Abort after the given number of seconds.\n"
@@ -222,6 +238,10 @@ bool parseArgs(int argc, char** argv, Options& opt, int& exitCode) {
             const char* v = need("--mink");
             if (!v || !parseIntArg(v, n, 0, INT_MAX)) { exitCode = 1; return false; }
             opt.mink = static_cast<int>(n);
+        } else if (a == "--focus") {
+            const char* v = need("--focus");
+            if (!v || !parseIntArg(v, n, 0, INT_MAX)) { exitCode = 1; return false; }
+            opt.focusBits = static_cast<int>(n);
         } else if (a == "--probe-vars") {
             const char* v = need("--probe-vars");
             if (!v || !parseIntArg(v, n, 1, 16)) { exitCode = 1; return false; }
@@ -260,6 +280,12 @@ bool parseArgs(int argc, char** argv, Options& opt, int& exitCode) {
             opt.cdclConflicts = static_cast<uint64_t>(n);
         } else if (a == "--no-cdcl") {
             opt.cdcl = false;
+        } else if (a == "--no-gf2") {
+            opt.gf2 = false;
+        } else if (a == "--gf2-interval") {
+            const char* v = need("--gf2-interval");
+            if (!v || !parseIntArg(v, n, 1, INT_MAX)) { exitCode = 1; return false; }
+            opt.gf2Interval = static_cast<int>(n);
         } else if (a == "--sample-rounds") {
             const char* v = need("--sample-rounds");
             if (!v || !parseIntArg(v, n, 1, INT_MAX)) { exitCode = 1; return false; }
@@ -397,7 +423,6 @@ RunOutcome runInstance(const Options& opt, const std::string& path, bool interac
     // is how the layout gets exercised in tests and screen captures.
     const bool forceUi = std::getenv("TCS_FORCE_UI") != nullptr;
     ui.setEnabled(interactive && opt.ui && (stdoutIsTty() || forceUi));
-    if (ui.enabled()) ui.prepare(cnf);
 
     ResourceMonitor rm;
     EtaTracker progress;
@@ -405,11 +430,12 @@ RunOutcome runInstance(const Options& opt, const std::string& path, bool interac
     model.cnf = &cnf;
     model.prop = &solver.master();
     model.numVars = cnf.numVars;
-    model.numClauses = cnf.clauseCount();
+    model.numClauses = solver.searchClauses();
     model.attempts = opt.attempts;
     model.sigLen = opt.sigLen;
     model.initk = opt.initk;
     model.mink = opt.mink;
+    model.focusBits = opt.focusBits;
     model.threads = opt.threads > 0 ? opt.threads
                                     : static_cast<int>(std::thread::hardware_concurrency());
 
@@ -453,6 +479,9 @@ RunOutcome runInstance(const Options& opt, const std::string& path, bool interac
         model.restarts = st.restarts;
         model.validSamples = st.validSamples;
         model.totalSamples = st.totalSamples;
+        model.focusBits = static_cast<int>(st.focusBits);
+        model.focusLanes = st.focusLanes;
+        model.focusRounds = st.focusRounds;
         model.sigBytes = st.signatureBytes;
         model.inputVarCount = static_cast<int>(solver.inputVars().size());
         model.gates = st.gates;
@@ -466,7 +495,7 @@ RunOutcome runInstance(const Options& opt, const std::string& path, bool interac
             lastLogNs = now;
             std::printf("[%s] %s vars %d/%d  clauses %u/%zu  probes %llu  attempt %u\n",
                         formatDuration(elapsed).c_str(), phase, assigned, cnf.numVars,
-                        solver.master().satisfiedClauses(), cnf.clauseCount(),
+                        solver.master().satisfiedClauses(), solver.searchClauses(),
                         static_cast<unsigned long long>(st.probes), st.attempt);
             std::fflush(stdout);
         }
@@ -514,6 +543,8 @@ void printSummary(const RunOutcome& r, const std::string& path) {
     if (!r.result.message.empty()) {
         std::printf("  detail       %s\n", r.result.message.c_str());
     }
+    std::printf("  assigned     %llu / %zu variables\n",
+                static_cast<unsigned long long>(s.assignedVars), r.numVars);
     std::printf("  attempts     %u (restarts %u)\n", s.attempt, s.restarts);
     if (s.gateSampling) {
         std::printf("  circuit      %llu gates recovered, samples executed\n",
@@ -525,6 +556,14 @@ void printSummary(const RunOutcome& r, const std::string& path) {
                     static_cast<unsigned long long>(s.unexplained));
     } else {
         std::printf("  circuit      no gate structure found, samples built by propagation\n");
+    }
+    if (s.focusBits > 0) {
+        std::printf("  focus        %llu target bits, %llu / %llu lanes reproduce them "
+                    "after %llu redraws\n",
+                    static_cast<unsigned long long>(s.focusBits),
+                    static_cast<unsigned long long>(s.focusLanes),
+                    static_cast<unsigned long long>(s.totalSamples),
+                    static_cast<unsigned long long>(s.focusRounds));
     }
     std::printf("  samples      %llu / %llu lanes in %.2fs\n",
                 static_cast<unsigned long long>(s.validSamples),
@@ -544,6 +583,16 @@ void printSummary(const RunOutcome& r, const std::string& path) {
                 static_cast<unsigned long long>(s.cdclConflicts),
                 static_cast<unsigned long long>(s.cdclImplied),
                 static_cast<unsigned long long>(s.cdclLearned));
+    if (s.gf2Equations > 0) {
+        std::printf("  gf2          %llu xor equations over %llu vars, %llu passes in %.2fs, "
+                    "%llu literals proved, %llu equivalences (%llu clauses added)\n",
+                    static_cast<unsigned long long>(s.gf2Equations),
+                    static_cast<unsigned long long>(s.gf2Vars),
+                    static_cast<unsigned long long>(s.gf2Runs), s.gf2Seconds,
+                    static_cast<unsigned long long>(s.gf2Units),
+                    static_cast<unsigned long long>(s.gf2Equivs),
+                    static_cast<unsigned long long>(s.gf2Clauses));
+    }
     std::printf("  signatures   %llu verdicts, %llu probes short of samples\n",
                 static_cast<unsigned long long>(s.signatureVerdicts),
                 static_cast<unsigned long long>(s.signatureBails));
@@ -656,6 +705,21 @@ int runBenchmark(const Options& opt) {
 
 int main(int argc, char** argv) {
     using namespace tcs;
+
+    // Randomised property tests over the CDCL contract and the propagator. Not
+    // part of the benchmark: it checks claims a solved instance cannot show.
+    if (argc >= 2 && std::strcmp(argv[1], "selftest") == 0) {
+        int rounds = 0;
+        uint64_t seed = 1;
+        for (int i = 2; i < argc; ++i) {
+            if (std::strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
+                seed = std::strtoull(argv[++i], nullptr, 10);
+            } else {
+                rounds = std::atoi(argv[i]);
+            }
+        }
+        return runSelfTest(seed, rounds);
+    }
 
     if (argc >= 2 && std::strcmp(argv[1], "gen-benchmark") == 0) {
         if (argc < 3) {

@@ -5,7 +5,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <numeric>
 
 namespace tcs {
 namespace {
@@ -48,27 +47,6 @@ void Ui::Line::put(const char* s, int budget) {
     }
 }
 
-void Ui::prepare(const Cnf& cnf) {
-    const size_t nc = cnf.clauseCount();
-    order_.resize(nc);
-    std::iota(order_.begin(), order_.end(), 0u);
-    std::vector<uint32_t> key(nc);
-    for (size_t c = 0; c < nc; ++c) {
-        uint32_t minVar = 0xFFFFFFFFu;
-        const Lit* b = cnf.clauseBegin(c);
-        for (uint32_t i = 0, e = cnf.clauseLen(c); i < e; ++i) {
-            minVar = std::min<uint32_t>(minVar, static_cast<uint32_t>(b[i] >> 1));
-        }
-        key[c] = minVar;
-    }
-    std::sort(order_.begin(), order_.end(), [&](uint32_t a, uint32_t b) {
-        const uint32_t la = cnf.clauseLen(a), lb = cnf.clauseLen(b);
-        if (la != lb) return la < lb;
-        if (key[a] != key[b]) return key[a] < key[b];
-        return a < b;
-    });
-}
-
 void Ui::begin() {
     if (!enabled_ || started_) return;
     tty_ = stdoutIsTty();
@@ -107,31 +85,50 @@ void Ui::end() {
     prev_.clear();
 }
 
+// One cell per band of variables, laid out with the highest variable numbers
+// on the top row and the lowest on the bottom one, so the map reads like the
+// variable numbering itself. A cell's level is the share of the clause slots
+// its variables occupy that sit in an already satisfied clause; a clause is
+// therefore weighted by how many of the cell's variables it mentions, which is
+// what makes a cell stand for the pressure on that part of the formula rather
+// than for a clause set.
+//
+// Both polarity occurrence lists of a variable are adjacent in `occ`, so a
+// whole band is one contiguous slice of it and a cell costs a single walk.
 void Ui::buildMap(const UiModel& m, int width, int height) {
     map_.clear();
     if (width < 4 || height < 1) return;
+    if (!m.cnf || !m.prop) return;
+    const Cnf& cnf = *m.cnf;
+    const size_t nv = static_cast<size_t>(cnf.numVars);
+    if (nv == 0 || cnf.occStart.size() < 2 * nv + 1) return;
     const size_t cells = static_cast<size_t>(width) * static_cast<size_t>(height);
-    const size_t nc = order_.size();
-    if (nc == 0) return;
 
     const std::array<std::string, 10>& ramp = rampFg();
     map_.resize(static_cast<size_t>(height));
     for (int r = 0; r < height; ++r) {
         Line& row = map_[static_cast<size_t>(r)];
         row.text.reserve(static_cast<size_t>(width) + 64);
+        // Row 0 holds the last band, so variable 1 lands in the bottom left.
+        const size_t rowBase = static_cast<size_t>(height - 1 - r) * static_cast<size_t>(width);
         int lastLevel = -1;
         for (int c = 0; c < width; ++c) {
-            const size_t cellIndex =
-                static_cast<size_t>(r) * static_cast<size_t>(width) + static_cast<size_t>(c);
-            const size_t from = cellIndex * nc / cells;
-            const size_t to = (cellIndex + 1) * nc / cells;
-            size_t total = 0, sat = 0;
+            const size_t cellIndex = rowBase + static_cast<size_t>(c);
+            const size_t varFrom = cellIndex * nv / cells;
+            // With fewer variables than cells the bands would come out empty
+            // and the map would be a scatter of dots; widening them to one
+            // variable spreads each over a run of cells instead.
+            size_t varTo = (cellIndex + 1) * nv / cells;
+            if (varTo <= varFrom) varTo = std::min(varFrom + 1, nv);
+            const size_t from = cnf.occStart[2 * varFrom];
+            const size_t to = cnf.occStart[2 * varTo];
+            size_t total = to - from, sat = 0;
             for (size_t i = from; i < to; ++i) {
-                ++total;
-                if (m.prop->clauseSatisfied(order_[i])) ++sat;
+                if (m.prop->clauseSatisfied(cnf.occ[i])) ++sat;
             }
             int level;
             if (total == 0) {
+                // No variable in this band occurs in a clause: nothing to say.
                 level = 0;
             } else {
                 const double frac = static_cast<double>(sat) / static_cast<double>(total);
@@ -251,6 +248,21 @@ void Ui::buildStatus(const UiModel& m, int width) {
     std::snprintf(buf, sizeof(buf), fmt("sigLen %d  initk %d  mink %d", "%d/%d/%d"),
                   m.sigLen, m.initk, m.mink);
     field("tuning", buf);
+    if (m.focusBits > 0) {
+        // While the rejection loop runs this is the only row that moves, so it
+        // carries the progress: how many lanes already reproduce the target
+        // bits, and how many redraws that has taken.
+        std::snprintf(buf, sizeof(buf), fmt("%d bits  %llu / %llu lanes  %llu redraws",
+                                            "%db %llu/%llu r%llu"),
+                      m.focusBits, static_cast<unsigned long long>(m.focusLanes),
+                      static_cast<unsigned long long>(m.totalSamples),
+                      static_cast<unsigned long long>(m.focusRounds));
+        field("focus", buf);
+        const double ff = m.totalSamples ? static_cast<double>(m.focusLanes) /
+                                               static_cast<double>(m.totalSamples)
+                                         : 0.0;
+        bar(ff, 178);
+    }
     std::snprintf(buf, sizeof(buf), "%d", m.inputVarCount);
     field("input vars", buf);
     if (m.gateSampling) {
@@ -318,7 +330,7 @@ void Ui::buildFrame(const UiModel& m, int cols, int rows, int mapW) {
     {
         Line& l = lines_[static_cast<size_t>(rows - 2)];
         l.esc(kDim);
-        l.put(" clause map: sorted by length then first variable; ", cols - l.visible);
+        l.put(" variable map: index rises left to right, bottom to top; ", cols - l.visible);
         l.esc(rampFg()[9]);
         l.put("#", cols - l.visible);
         l.esc(kDim);

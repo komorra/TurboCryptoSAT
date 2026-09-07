@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "cdcl.h"
+#include "gf2.h"
 #include "cnf.h"
 #include "gates.h"
 #include "options.h"
@@ -66,10 +67,21 @@ struct SolveStats {
     double solveSeconds = 0.0;
     uint64_t validSamples = 0;
     uint64_t totalSamples = 0;
+    uint64_t focusBits = 0;      // target bits the sample population must reproduce
+    uint64_t focusLanes = 0;     // lanes that reproduce them
+    uint64_t focusRounds = 0;    // redraws it dispatched getting there
     uint64_t signatureBytes = 0;
     uint64_t unusedVars = 0;     // variables no clause mentions
     int oracleVar = -1;          // 0-based variable that contradicted the oracle
     uint64_t assignedVars = 0;   // variables assigned when the run stopped
+    uint64_t gf2Equations = 0;   // XOR constraints recovered from the clauses
+    uint64_t gf2Vars = 0;        // variables they mention
+    uint64_t gf2Runs = 0;        // elimination passes
+    uint64_t gf2Units = 0;       // literals they proved
+    uint64_t gf2Equivs = 0;      // equivalences found at the root
+    uint64_t gf2Clauses = 0;     // ...of which propagation could not reach
+    uint64_t gf2Conflicts = 0;   // passes that refuted the assignment
+    double gf2Seconds = 0.0;     // time spent eliminating
     uint64_t gates = 0;          // gates recovered from the clauses
     uint64_t unexplained = 0;    // clauses no recovered gate accounts for
     bool gateSampling = false;   // samples produced by executing them
@@ -110,6 +122,11 @@ public:
     const SolveStats& stats() const { return stats_; }
     const std::vector<Var>& inputVars() const { return inputVars_; }
     const GateNetwork& gateNetwork() const { return gateNet_; }
+    // Clauses the search actually runs on: the file's, plus whatever the root
+    // GF(2) pass derived. The UI needs this as its denominator - clause indices
+    // below `cnf.clauseCount()` still mean the same clauses, the derived ones
+    // are appended after them.
+    size_t searchClauses() const { return search_ ? search_->clauseCount() : 0; }
     size_t targetLitCount() const { return targetLits_.size(); }
 
 private:
@@ -133,6 +150,14 @@ private:
     // `progress` says whether it moved the assignment; the return value is
     // false only when the attempt is over (refuted, interrupted, out of time).
     bool runCdclPhase(SolveStatus& status, bool& progress);
+    // One elimination pass over the current assignment. Applies whatever units
+    // it proves; false means the attempt is over (refuted, or the oracle
+    // tripped). `progress` says whether the assignment moved.
+    bool runGf2(SolveStatus& status, bool& progress);
+    // Recovers the parity constraints, reduces them once against the base
+    // assignment, and folds the equivalences that come out into `augmented_`.
+    PrepareResult prepareGf2(std::string& error);
+    const Cnf& searchCnf() const { return *search_; }
     bool verify() const;
     // Scans master_'s trail from `from` for a literal the oracle contradicts.
     bool oracleBroken(size_t from);
@@ -143,6 +168,18 @@ private:
     // the unit clauses, since those either pin the target outputs or are handed
     // to the generator as fixed literals.
     Cnf sampleCnf_;
+    // The formula the search actually runs on: the original clauses plus the
+    // binary clauses the root GF(2) pass derived. Those are consequences of the
+    // formula, so a model of this is a model of `cnf_` - which is what verify()
+    // still checks against. The sample population is built from `cnf_` instead,
+    // so the recovered gate network stays complete and the fast sampler stays
+    // available.
+    Cnf augmented_;
+    const Cnf* search_ = nullptr;  // &cnf_, or &augmented_ once GF(2) added to it
+    Gf2System gf2_;
+    Gf2Result gf2Res_;
+    std::vector<Lit> gf2New_;      // scratch: units master_ does not have yet
+    size_t gf2LastAssigned_ = 0;   // master_ size at the last elimination pass
     // The circuit read back out of `sampleCnf_`, when there was one. A complete
     // network is what the sample generator runs instead of propagating.
     GateNetwork gateNet_;
