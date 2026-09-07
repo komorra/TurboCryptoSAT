@@ -694,11 +694,10 @@ bool Solver::runProbe(Worker& w) {
         if (ok) ok = w.prop.propagate();
         if (!ok) {
             w.prop.undoTo(w.base);
-            // A statistical conflict does not refute this branch. Keep its
-            // plain propagation closure in the intersection instead of silently
-            // turning the other branches' guesses into unconditional literals.
-            for (Lit l : combo) w.prop.enqueue(l);
-            w.prop.propagate();  // this combination survived stage one
+            // Signature implications are accepted as assignments, including
+            // their power to reject a branch. This is intentionally statistical:
+            // the user controls that risk through the sampling parameters.
+            continue;
         }
         const std::vector<Lit>& tr = w.prop.trail();
         w.branchLits.assign(tr.begin() + static_cast<std::ptrdiff_t>(w.base), tr.end());

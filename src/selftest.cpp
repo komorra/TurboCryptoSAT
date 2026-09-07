@@ -28,7 +28,7 @@
 namespace tcs {
 
 // Exercise the actual probe with a population valid for the relaxed formula.
-// A sample-derived conflict must not remove a logically viable branch.
+// A sample-derived conflict must reject the branch even when BCP alone accepts it.
 struct SolverTestAccess {
     static bool check() {
         Cnf cnf;
@@ -58,7 +58,9 @@ struct SolverTestAccess {
             w.stamp.assign(3, 0);
             w.stampPol.assign(3, 0);
             solver.runProbe(w);
-            if (w.hardConflict || !w.result.empty()) return false;
+            // The samples reject NOT x, so the remaining branch commits x.
+            // This checks the intended statistical contract, not logical entailment.
+            if (w.hardConflict || w.result != std::vector<Lit>{mkLit(0, false)}) return false;
             // A wrapped stamp must not match an entry from an ancient pass.
             w.stampCounter = UINT32_MAX;
             w.stamp.assign(3, 1);

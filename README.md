@@ -43,9 +43,11 @@ away with that is a population of samples.
    dilemma part is sound; the sample part is a statistical bet.
 5. **Repeat** until every variable is assigned, then verify the assignment against the formula.
 
-A branch whose sample-derived literals conflict remains in the intersection with its plain
-propagation closure. Only a conflict established before adding statistical guesses can refute
-the branch. The contiguous filter window stops at the end of the ordered assignment, as in the
+A branch whose sample-derived literals conflict is discarded from the intersection, even when
+plain propagation accepts it. Signature implications are accepted as assignments; their errors
+can therefore eliminate a viable branch. The user controls this statistical tradeoff through
+`focus`, `mink`, `initk` and the other sampling parameters.
+The contiguous filter window stops at the end of the ordered assignment, as in the
 C# prototype; it does not wrap from the last variable back to the first.
 
 Because step 4 can be wrong, the solver can paint itself into a corner. When every polarity of
