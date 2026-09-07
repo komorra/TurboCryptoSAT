@@ -21,12 +21,12 @@ struct Options {
     int initk = 6;               // literals taken from the current assignment per probe;
                                  // halved on every restart
     // Minimum evidence for a signature verdict. Preserve the existing sample
-    // default; minkWords selects Piessra's occupied-word count. There is no
+    // default; minkWords selects the C# prototype's occupied-word count. There is no
     // fixed conversion between these units after filtering a population.
     int mink = 640;
-    bool minkWords = false;      // true: count nonempty words, as in Piessra
+    bool minkWords = false;      // true: count nonempty words, as in the C# prototype
     int probeVars = 1;           // variables probed at once (2^probeVars combinations)
-    bool probeDescending = false; // follow decreasing variable IDs, as in Piessra
+    bool probeDescending = false; // follow decreasing variable IDs, as in the C# prototype
 
     // How many bits of the target valuation the sample population has to
     // reproduce. 0 leaves the samples free executions of the circuit, which is

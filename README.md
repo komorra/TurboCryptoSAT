@@ -533,81 +533,109 @@ or point the solver at any directory of `.cnf` files:
 turbocryptosat benchmark path/to/instances --no-ui --timeout 300
 ```
 
-It prints a per-instance line as it goes and a summary table at the end. This is the whole
-suite on a 16-core / 32-thread desktop, default settings, 60 seconds per instance:
+The commands above use one configuration for the whole directory. The measurement below
+instead uses the reproducible family profiles in [`benchmark-tuned.ps1`](benchmark-tuned.ps1).
 
-```
-+------------------------------------+---------+---------+------------+-----+----------+----------+------------+
-| instance                           |    vars | clauses | status     | att |  sample  |   total  |     probes |
-+------------------------------------+---------+---------+------------+-----+----------+----------+------------+
-| 01-rand3sat-n060.cnf               |      60 |     252 | SOLVED     |   1 |    0.30s |    0.53s |      32032 |
-| 02-rand3sat-n100.cnf               |     100 |     420 | SOLVED     |   1 |    0.07s |    0.31s |      32032 |
-| 03-rand3sat-n150.cnf               |     150 |     630 | SOLVED     |   1 |    0.28s |    0.52s |      32032 |
-| 04-rand3sat-n220.cnf               |     220 |     924 | SOLVED     |   1 |    0.46s |    0.71s |      32032 |
-| 05-rand3sat-n320.cnf               |     320 |    1360 | SOLVED     |   1 |    1.06s |    1.37s |      32032 |
-| 06-rand3sat-n450.cnf               |     450 |    1912 | SOLVED     |   1 |    1.88s |    2.60s |      64064 |
-| 07-rand3sat-n650.cnf               |     650 |    2769 | SOLVED     |   1 |    6.38s |   47.58s |     256256 |
-| 08-rand3sat-n900.cnf               |     900 |    3834 | TIMEOUT    |   1 |    5.08s |   60.00s |     224224 |
-| 09-circuit-i24-g300.cnf            |     322 |     981 | SOLVED     |   1 |    0.07s |    0.36s |      32032 |
-| 10-circuit-i32-g600.cnf            |     625 |    1959 | SOLVED     |   1 |    0.13s |    0.87s |      80384 |
-| 11-circuit-i48-g1200.cnf           |    1242 |    3921 | SOLVED     |   1 |    0.28s |    4.41s |     424320 |
-| 12-circuit-i64-g2000.cnf           |    2059 |    6571 | SOLVED     |   1 |    0.10s |    3.28s |     309536 |
-| 13-circuit-i96-g3500.cnf           |    3594 |   11420 | SOLVED     |   1 |    0.98s |    6.44s |     475488 |
-| 14-circuit-i128-g6000.cnf          |    6125 |   19631 | SOLVED     |   1 |    2.33s |    6.22s |     264736 |
-| 15-xorcircuit-i24-g200.cnf         |     223 |     757 | SOLVED     |   1 |    0.13s |    0.42s |      32064 |
-| 16-xorcircuit-i32-g400.cnf         |     430 |    1502 | SOLVED     |   1 |    0.57s |    0.86s |      32128 |
-| 17-xorcircuit-i48-g800.cnf         |     846 |    3000 | SOLVED     |   1 |    0.22s |    0.56s |      32064 |
-| 18-xorcircuit-i64-g1500.cnf        |    1562 |    5586 | SOLVED     |   1 |    0.50s |    0.84s |      32704 |
-| 19-xorcircuit-i96-g2500.cnf        |    2590 |    9351 | SOLVED     |   1 |    0.72s |    4.62s |     128128 |
-| 20-xorcircuit-i128-g4000.cnf       |    4125 |   14908 | TIMEOUT    |   1 |    2.11s |   60.00s |     288288 |
-| 21-sha256-r08-c03.cnf              |   10490 |   35148 | SOLVED     |   1 |    4.56s |    4.58s |          0 |
-| 22-sha256-r11-c03.cnf              |   15177 |   50723 | SOLVED     |   1 |    8.95s |    8.98s |          0 |
-| 23-sha256-r14-c03.cnf              |   19894 |   66389 | SOLVED     |   1 |   13.77s |   13.80s |          0 |
-| 24-sha256-r17-c03.cnf              |   24765 |   82564 | TIMEOUT    |   1 |   16.92s |   60.01s |     182720 |
-| 25-sha256-r20-c03.cnf              |   29725 |   99060 | TIMEOUT    |   1 |   21.01s |   60.02s |     219968 |
-| 26-sha256-r17-c04.cnf              |   25264 |   84217 | TIMEOUT    |   1 |   15.68s |   60.01s |     287712 |
-+------------------------------------+---------+---------+------------+-----+----------+----------+------------+
+**Measured 2026-09-07:** AMD Ryzen 9 7950X (16 cores / 32 logical processors), Windows x64,
+GCC 15.2.0, C++17, `-O2 -pthread`. Instances ran serially, once each with **seed 1 and a
+60-second limit**. Profiles were selected in an exploratory pilot with seed 11, before this
+full run; they are practical settings, not a claim of a global optimum. All 26 outcomes are
+included, with no retries or selection of the best seed. No solution oracle or input hints
+were supplied. Every reported solution was checked against every clause, including a separate
+check of the written model files.
 
-solved 21 / 26 instances in 409.94s
+| Profile | Instances | `siglen` | `initk` | `mink` / unit | `focus` | `probe-vars` | Probe order | Threads |
+| --- | --- | ---: | ---: | --- | ---: | ---: | --- | ---: |
+| `cdcl` | 01–08 | 64 | 6 | 64 / samples | 0 | 1 | ascending | 1 |
+| `circuit` | 09–20 | 256 | 8 | 16 / words | 0 | 2 | descending | 4 |
+| `focused` | 21–26 | 1024 | 10 | 32 / words | 6 | 4 | descending | 4 |
+
+The additional flags are `--stall-limit 0 --sample-rounds 1 --no-gf2` for `cdcl`,
+`--stall-limit 128` for `circuit`, and `--stall-limit 256` for `focused`. Remaining options
+use this revision's defaults, including five attempts and CDCL enabled. `words` counts
+nonempty 64-bit words after filtering; it is not a fixed multiple of surviving samples.
+
+Reproduce the table from PowerShell after building the solver:
+
+```powershell
+.\benchmark-tuned.ps1 -Profile auto -Seed 1 -Timeout 60
 ```
 
-Read across the families rather than down the rows. The circuits it was built for fall in
-seconds. Reduced-round SHA-256 up to 14 rounds is finished by propagation from the pinned digest
-before the sample layer is even consulted — note the zero probe count — while 17 and 20 rounds
-are still past what it reaches in a minute; it gets roughly a third of the way and slows down.
+Use `-Binary build/Release/turbocryptosat.exe` for an MSVC build. Logs, per-instance JSON
+records and model files go to `build/benchmark-tuned/`. The archived
+[measurement data](benchmark-results/2026-09-07.json) includes the exact argument arrays,
+input and binary hashes, recorded pilot outcomes, and the final runs.
 
-Then read the `sample` column against the `probes` column, because on this table the default
-`--focus 8` is the most expensive thing in the suite. Rows `21`–`23` solve with **zero probes**
-and still spend 4.6 s, 9.0 s and 13.8 s building a population nothing ever reads; rows `24`–`26`
-hand 16–21 s of their 60 s budget to the focus pass, which is why `24-sha256-r17-c03` runs
-182 720 probes here against 935 424 with `--focus 0`. The pass is unconditional and runs before
-the search does, so the solver cannot know yet that it will not need it. On the SHA family
-`--focus 0` is the better setting; the default earns itself back on the XOR circuits, where the
-population is what carries the run.
+Times below are the CLI's wall times, including DIMACS loading and solver setup, but excluding
+the final model verification and file write. They are rounded to 0.01 s; `<0.01` denotes a
+reported `0.00`. Sampling time is included in total time. `CDCL` counts search phases, so a
+solved row with a nonzero value is not evidence of a signatures-only solve.
 
-The XOR-heavy rows and the random 3-SAT rows are where the plateau handler shows. Both families
-leave the probes with nothing to intersect — the first because parity structure is invisible to
-unit propagation, the second because there is no driving input set and the population carries no
-signal at all — and both used to end in `TIMEOUT` or `EXHAUSTED` from 48 inputs and n = 150
-upwards, after a guess that was close to a coin flip. Under the CDCL phase `03`–`06` finish in
-a second or two each and `17`–`19` in under three; `07` lands either side of the limit depending
-on the seed, and `08` and `20` still do not. Read those rows honestly: they are not evidence for
-the signature idea, they are evidence that what happens when it runs out is no longer a gamble.
-The suite as a whole went from 13 solved in 709 s to 21 in 341 s, and every gain is in those two
-families.
+| Instance | Vars | Clauses | Profile | Status | Total (s) | Sampling (s) | Probes | CDCL |
+| --- | ---: | ---: | --- | --- | ---: | ---: | ---: | ---: |
+| `01-rand3sat-n060` | 60 | 252 | `cdcl` | SOLVED | <0.01 | <0.01 | 1 | 1 |
+| `02-rand3sat-n100` | 100 | 420 | `cdcl` | SOLVED | <0.01 | <0.01 | 1 | 1 |
+| `03-rand3sat-n150` | 150 | 630 | `cdcl` | SOLVED | <0.01 | <0.01 | 1 | 1 |
+| `04-rand3sat-n220` | 220 | 924 | `cdcl` | SOLVED | 0.01 | <0.01 | 1 | 1 |
+| `05-rand3sat-n320` | 320 | 1360 | `cdcl` | SOLVED | 0.01 | 0.01 | 1 | 1 |
+| `06-rand3sat-n450` | 450 | 1912 | `cdcl` | SOLVED | 0.31 | 0.03 | 5 | 3 |
+| `07-rand3sat-n650` | 650 | 2769 | `cdcl` | SOLVED | 6.24 | 0.04 | 8 | 6 |
+| `08-rand3sat-n900` | 900 | 3834 | `cdcl` | TIMEOUT | 60.00 | 0.06 | 9 | 7 |
+| `09-circuit-i24-g300` | 322 | 981 | `circuit` | SOLVED | 0.04 | <0.01 | 2868 | 1 |
+| `10-circuit-i32-g600` | 625 | 1959 | `circuit` | SOLVED | 0.02 | <0.01 | 2176 | 1 |
+| `11-circuit-i48-g1200` | 1242 | 3921 | `circuit` | SOLVED | 0.03 | <0.01 | 2504 | 1 |
+| `12-circuit-i64-g2000` | 2059 | 6571 | `circuit` | SOLVED | 0.05 | <0.01 | 2948 | 1 |
+| `13-circuit-i96-g3500` | 3594 | 11420 | `circuit` | SOLVED | 0.15 | 0.01 | 4320 | 1 |
+| `14-circuit-i128-g6000` | 6125 | 19631 | `circuit` | SOLVED | 0.92 | 0.01 | 11464 | 1 |
+| `15-xorcircuit-i24-g200` | 223 | 757 | `circuit` | SOLVED | 0.01 | <0.01 | 1552 | 1 |
+| `16-xorcircuit-i32-g400` | 430 | 1502 | `circuit` | SOLVED | 0.01 | <0.01 | 1684 | 1 |
+| `17-xorcircuit-i48-g800` | 846 | 3000 | `circuit` | SOLVED | 0.09 | <0.01 | 4796 | 1 |
+| `18-xorcircuit-i64-g1500` | 1562 | 5586 | `circuit` | SOLVED | 0.14 | <0.01 | 3696 | 1 |
+| `19-xorcircuit-i96-g2500` | 2590 | 9351 | `circuit` | SOLVED | 2.19 | 0.01 | 6560 | 3 |
+| `20-xorcircuit-i128-g4000` | 4125 | 14908 | `circuit` | TIMEOUT | 60.00 | 0.01 | 9072 | 7 |
+| `21-sha256-r08-c03` | 10490 | 35148 | `focused` | SOLVED | <0.01 | <0.01 | 0 | 0 |
+| `22-sha256-r11-c03` | 15177 | 50723 | `focused` | SOLVED | 0.01 | <0.01 | 0 | 0 |
+| `23-sha256-r14-c03` | 19894 | 66389 | `focused` | SOLVED | 0.01 | <0.01 | 0 | 0 |
+| `24-sha256-r17-c03` | 24765 | 82564 | `focused` | TIMEOUT | 60.01 | 7.29 | 14816 | 5 |
+| `25-sha256-r20-c03` | 29725 | 99060 | `focused` | TIMEOUT | 60.01 | 9.35 | 18584 | 4 |
+| `26-sha256-r17-c04` | 25264 | 84217 | `focused` | TIMEOUT | 60.01 | 7.49 | 14456 | 5 |
 
-Note the `sample` column on the circuit and SHA-256 rows: those populations are executed rather
-than propagated, so building them is no longer a visible share of a run - the seconds against
-17 and 20 rounds are the probe loop failing to find agreement, not the sampler. The random
-3-SAT rows are the ones that still pay for propagated populations, and there the number counts
-every redraw a stalling run asked for. It grows with `n` because a formula with no driving input
-set leaves the generator filling in every variable one at a time, propagating after each - which
-is what makes the lanes it keeps genuine samples, and on these instances what makes it discover
-that almost none of them are.
+**Solved 21 / 26; sum of reported times: 310.27 s**, including timeouts.
+Unsolved within the limit: `08-rand3sat-n900`, `20-xorcircuit-i128-g4000`, `24-sha256-r17-c03`, `25-sha256-r20-c03`, `26-sha256-r17-c04`.
+
+Rows 21–23 finish through root propagation and skip sample construction entirely. The circuit
+profiles keep sampling inexpensive and allow CDCL to handle plateaus. The seed-11 pilot did
+not solve the difficult SHA cases: raising focus to 8 and allowing one-sample verdicts
+(`mink 0`) spent most of the longer trials rebuilding populations, without a verified solve.
+The older default-settings table used a different configuration and did not record its seed;
+its times are not a controlled before/after comparison of the implementation.
+
+### External Beast r17c3
+
+The user-supplied Beast instance is a separate test, **not** `24-sha256-r17-c03.cnf` above.
+It has 79,749 clauses, maximum variable ID 37,803, 23,846 occurring variables and 21 circuit
+inputs. Its SHA-256 is `f37904509d9ff0817e1bb0feb1a235365070597b8e8ada3ba2b035b7c9cae1aa`.
+This input is not distributed in the repository.
+
+The previously validated signatures profile was rerun with seeds 1, 2 and 3, a 30-second
+limit, and **CDCL and GF(2) disabled**:
+
+```powershell
+.\build\turbocryptosat.exe path/to/beast-r17c3.cnf --no-ui --seed 1 --timeout 30 --siglen 1024 --initk 10 --mink 32 --mink-unit words --focus 6 --probe-vars 4 --probe-order descending --threads 4 --no-cdcl --no-gf2 --keep-samples
+```
+
+| Seed | Status | Total (s) | Sampling (s) | Probes | CDCL |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 1 | SOLVED | 10.83 | 7.10 | 4864 | 0 |
+| 2 | SOLVED | 12.22 | 7.50 | 5996 | 0 |
+| 3 | SOLVED | 11.70 | 7.25 | 5752 | 0 |
+
+These three runs are excluded from the 26-instance total. Their solutions were also checked
+clause by clause. Three seeds describe this measurement, not a general solve-rate guarantee.
 
 ### Tests
 
-The benchmark is the test suite for whether the solver answers correctly. Every solved instance
+The benchmark checks that reported SAT models satisfy the input; it does not establish completeness. Every solved instance
 is re-checked clause by clause against the file it came from, independently of the solver's own
 bookkeeping; an assignment that does not satisfy the formula is reported as `BAD` rather than
 `SOLVED`, so a wrong answer fails the run rather than passing quietly.
@@ -636,8 +664,9 @@ turbocryptosat selftest 50000   # the property tests on their own, longer
 
 `--initk` and `--mink` together decide whether the statistical layer says anything at all, and
 they are the two knobs worth sweeping before concluding an instance is out of reach. The
-defaults, `6` and `10`, were picked on a 17-round SHA-256 preimage; here is the measurement, so
-you can see how narrow the useful band is.
+historical experiments below used `initk 6` and `mink 10` in occupied-word units on a
+17-round SHA-256 preimage. They predate the current implementation and are retained as tuning
+examples, separately from the dated benchmark above.
 
 First a grid at `--attempts 1` (so `initk` means one thing — with restarts it halves down the
 ladder), two seeds per cell, 45 s each, showing how far the run got:

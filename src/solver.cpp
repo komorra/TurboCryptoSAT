@@ -495,7 +495,7 @@ void Solver::signatureOutcome(Worker& w, const std::vector<Lit>& forced, std::ve
         }
     }
 
-    // Piessra counts occupied words, not lanes. Neither threshold is a logical
+    // the C# prototype counts occupied words, not lanes. Neither threshold is a logical
     // proof: it controls how aggressively the statistical layer can assign.
     // The units cannot be converted by multiplying by 64 after filtering.
     const uint64_t evidence = opt_.minkWords ? w.keepIdx.size() : survivingSamples;
@@ -590,7 +590,7 @@ bool Solver::runProbe(Worker& w) {
     const int k = std::max(1, std::min(opt_.probeVars, 16));
 
     // Sample a position among occurring variables, not among numerical IDs.
-    // Descending scans reproduce Piessra's ordered set and stop at its end.
+    // Descending scans reproduce the C# prototype's ordered set and stop at its end.
     w.probeVars.clear();
     const Var start = static_cast<Var>(w.rng.below(static_cast<uint32_t>(nvars)));
     for (int i = 0; i < nvars && static_cast<int>(w.probeVars.size()) < k; ++i) {
