@@ -193,6 +193,7 @@ private:
     std::vector<Lit> targetLits_;  // output valuation the solver must honour
     std::vector<Lit> sampleFixed_; // units that constrain the sample population
     std::vector<Var> inputVars_;
+    std::vector<Var> searchVars_; // occurring variables only, in increasing order
     std::vector<Lit> sortedInit_;  // assigned literals in variable order
 
     // Kept alive across phases within one attempt so its learned clauses carry

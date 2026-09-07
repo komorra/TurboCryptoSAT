@@ -23,7 +23,11 @@ const char* toString(SolveStatus s) {
 }
 
 Solver::Solver(const Cnf& cnf, const Options& opt)
-    : cnf_(cnf), search_(&cnf), opt_(opt), rng_(opt.seed) {}
+    : cnf_(cnf), search_(&cnf), opt_(opt), rng_(opt.seed) {
+    for (Var v = 0; v < cnf.numVars; ++v) {
+        if (cnf.occurs(v)) searchVars_.push_back(v);
+    }
+}
 
 Solver::~Solver() = default;
 
@@ -57,7 +61,9 @@ void Solver::detectInputs() {
         const int lo = std::max(1, opt_.inputFrom);
         const int hi = std::min(cnf_.numVars, opt_.inputTo);
         inputVars_.reserve(static_cast<size_t>(std::max(0, hi - lo + 1)));
-        for (int v = lo; v <= hi; ++v) inputVars_.push_back(v - 1);
+        for (int v = lo; v <= hi; ++v) {
+            if (cnf_.occurs(v - 1)) inputVars_.push_back(v - 1);
+        }
         return;
     }
 
@@ -67,6 +73,7 @@ void Solver::detectInputs() {
     probe.propagate();
 
     auto adopt = [&](Var v) {
+        if (!cnf_.occurs(v)) return;
         if (probe.assigned(v)) return;
         inputVars_.push_back(v);
         const size_t m = probe.mark();
@@ -83,7 +90,7 @@ void Solver::detectInputs() {
     if (gateNet_.complete()) {
         for (Var v : gateNet_.freeVars) adopt(v);
     }
-    for (Var v = 0; v < sampleCnf_.numVars; ++v) adopt(v);
+    for (Var v : searchVars_) adopt(v);
 }
 
 int Solver::workerThreads() const {
@@ -338,6 +345,12 @@ void Solver::buildSampleCnf() {
         if (len > sampleCnf_.maxClauseLen) sampleCnf_.maxClauseLen = len;
     }
     sampleCnf_.buildOccurrences();
+    // A target variable occurring only in unit clauses disappears from the
+    // relaxed CNF. Pin its requested value instead of treating it as an unused
+    // numbering gap: it cannot constrain any gate, but still enters the filter.
+    for (Lit l : targetLits_) {
+        if (!sampleCnf_.occurs(litVar(l))) sampleFixed_.push_back(l);
+    }
 }
 
 bool Solver::buildSignatures(std::string& error) {
@@ -433,7 +446,7 @@ void Solver::collectSortedInit() {
     sortedInit_.clear();
     const std::vector<int8_t>& val = master_.values();
     sortedInit_.reserve(master_.assignedCount());
-    for (int v = 0; v < cnf_.numVars; ++v) {
+    for (Var v : searchVars_) {
         const int8_t x = val[static_cast<size_t>(v)];
         if (x != 0) sortedInit_.push_back(mkLit(v, x < 0));
     }
@@ -482,17 +495,11 @@ void Solver::signatureOutcome(Worker& w, const std::vector<Lit>& forced, std::ve
         }
     }
 
-    // Too few surviving samples: any verdict would be noise, so fall back to
-    // what plain propagation already knows.
-    //
-    // `mink` is in SAMPLES. That is the only reading that makes the threshold
-    // mean anything, and it is why the default is 640 rather than 10: a
-    // variable that is constant across n samples is constant by chance with
-    // probability 2^-(n-1), so with 24k variables to test, n = 11 hands back
-    // around two dozen invented implications per probe while n = 640 hands
-    // back none. Counting lane words instead would put the same number on a
-    // wildly different amount of evidence depending on --siglen.
-    if (survivingSamples <= static_cast<uint64_t>(opt_.mink)) {
+    // Piessra counts occupied words, not lanes. Neither threshold is a logical
+    // proof: it controls how aggressively the statistical layer can assign.
+    // The units cannot be converted by multiplying by 64 after filtering.
+    const uint64_t evidence = opt_.minkWords ? w.keepIdx.size() : survivingSamples;
+    if (evidence <= static_cast<uint64_t>(opt_.mink)) {
         ++w.sigBails;
         out.assign(forced.begin(), forced.end());
         return;
@@ -578,17 +585,18 @@ bool Solver::runProbe(Worker& w) {
     w.result.clear();
     w.hardConflict = false;
 
-    const int nvars = cnf_.numVars;
+    const int nvars = static_cast<int>(searchVars_.size());
+    if (nvars == 0) return false;
     const int k = std::max(1, std::min(opt_.probeVars, 16));
 
-    // Pick k variables: scan forward from a random offset and take the first
-    // unassigned ones. This is deliberately not a uniform draw over the
-    // unassigned set - it favours variables that sit just past a run of already
-    // assigned ones, which is where propagation has the most to work with.
+    // Sample a position among occurring variables, not among numerical IDs.
+    // Descending scans reproduce Piessra's ordered set and stop at its end.
     w.probeVars.clear();
     const Var start = static_cast<Var>(w.rng.below(static_cast<uint32_t>(nvars)));
     for (int i = 0; i < nvars && static_cast<int>(w.probeVars.size()) < k; ++i) {
-        const Var v = (start + i) % nvars;
+        if (opt_.probeDescending && i > start) break;
+        const int index = opt_.probeDescending ? start - i : (start + i) % nvars;
+        const Var v = searchVars_[static_cast<size_t>(index)];
         if (!w.prop.assigned(v)) w.probeVars.push_back(v);
     }
     if (w.probeVars.empty()) return false;

@@ -83,6 +83,10 @@ struct Cnf {
     size_t clauseCount() const { return start.empty() ? 0 : start.size() - 1; }
     const Lit* clauseBegin(size_t c) const { return lits.data() + start[c]; }
     uint32_t clauseLen(size_t c) const { return start[c + 1] - start[c]; }
+    bool occurs(Var v) const {
+        const size_t p = static_cast<size_t>(v) * 2;
+        return occStart[p] != occStart[p + 2];
+    }
 
     void buildOccurrences();
 };

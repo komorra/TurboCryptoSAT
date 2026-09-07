@@ -270,7 +270,7 @@ void buildAxes(const std::string& preset, std::vector<Axis>& axes, bool& ok) {
         axes.push_back({"mink", {256, 512, 640, 1024, 1536, 2048, 4096}, nullptr, &Params::mink});
         axes.push_back({"siglen", {256, 512, 1024, 2048}, nullptr, &Params::sigLen});
         axes.push_back({"stall-limit", {250, 1000, 4000}, &Params::stallLimit, nullptr});
-        axes.push_back({"probe-vars", {1, 2}, nullptr, &Params::probeVars});
+        axes.push_back({"probe-vars", {1, 2, 4}, nullptr, &Params::probeVars});
     } else if (preset == "thorough") {
         axes.push_back({"initk", {2, 3, 4, 5, 6, 7, 8, 9, 10, 12}, nullptr, &Params::initk});
         axes.push_back({"mink", {128, 256, 512, 640, 768, 1024, 1536, 2048, 3072, 4096},
@@ -278,7 +278,7 @@ void buildAxes(const std::string& preset, std::vector<Axis>& axes, bool& ok) {
         axes.push_back({"siglen", {256, 512, 1024, 2048, 4096}, nullptr, &Params::sigLen});
         axes.push_back({"stall-limit", {100, 250, 1000, 4000, 16000},
                         &Params::stallLimit, nullptr});
-        axes.push_back({"probe-vars", {1, 2, 3}, nullptr, &Params::probeVars});
+        axes.push_back({"probe-vars", {1, 2, 3, 4}, nullptr, &Params::probeVars});
         axes.push_back({"sample-rounds", {6, 12, 24}, nullptr, &Params::sampleRounds});
     } else {
         ok = false;
@@ -306,6 +306,14 @@ int runTune(const Options& opt) {
         std::fprintf(stderr, "unknown preset: %s (quick, balanced, thorough)\n",
                      opt.tunePreset.c_str());
         return 1;
+    }
+    // The prototype's occupied-word threshold is a different parameter space,
+    // not the sample grid divided by 64 (occupancy changes with each filter).
+    if (opt.minkWords) {
+        for (Axis& axis : axes) {
+            if (axis.slotInt == &Params::mink)
+                axis.values = {4, 8, 10, 16, 24, 32, 48, 64};
+        }
     }
 
     std::vector<Target> targets;
@@ -403,7 +411,9 @@ int runTune(const Options& opt) {
 
     std::printf("  trials       %zu distinct settings in %s\n", trials,
                 formatDuration(elapsed).c_str());
-    std::printf("  best         %s\n", describe(best).c_str());
+    std::printf("  best         %s --mink-unit %s --probe-order %s --focus %d\n",
+                describe(best).c_str(), opt.minkWords ? "words" : "samples",
+                opt.probeDescending ? "descending" : "ascending", opt.focusBits);
     if (bestScore.full()) {
         std::printf("  result       SOLVED on every run (%d/%d), %.2fs average\n",
                     bestScore.solved, bestScore.runs, bestScore.seconds);

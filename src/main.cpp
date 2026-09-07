@@ -57,7 +57,10 @@ void printUsage() {
         "                        verdicts drawn from too few samples.\n"
         "  --mink <n>            Minimum surviving samples for a verdict, counted in\n"
         "                        samples (lanes), not 64-bit words. Default 640,\n"
-        "                        which is ten full lane words.\n"
+        "                        with an alternative word threshold below.\n"
+        "  --mink-unit <unit>   samples (default) or words (nonempty 64-bit words,\n"
+        "                        matching Piessra). Set --mink explicitly for words.\n"
+        "  --probe-order <dir>  ascending (default) or descending (Piessra order).\n"
         "  --probe-vars <n>      Variables probed at once (2^n branches). Default 1.\n"
         "  --focus <n>           Bits of the target valuation every sample must\n"
         "                        reproduce. Lanes that miss one are redrawn until\n"
@@ -242,6 +245,26 @@ bool parseArgs(int argc, char** argv, Options& opt, int& exitCode) {
             const char* v = need("--focus");
             if (!v || !parseIntArg(v, n, 0, INT_MAX)) { exitCode = 1; return false; }
             opt.focusBits = static_cast<int>(n);
+        } else if (a == "--mink-unit") {
+            const char* v = need("--mink-unit");
+            if (!v) { exitCode = 1; return false; }
+            if (std::strcmp(v, "words") == 0) opt.minkWords = true;
+            else if (std::strcmp(v, "samples") == 0) opt.minkWords = false;
+            else {
+                std::fprintf(stderr, "--mink-unit expects samples or words\n");
+                exitCode = 1;
+                return false;
+            }
+        } else if (a == "--probe-order") {
+            const char* v = need("--probe-order");
+            if (!v) { exitCode = 1; return false; }
+            if (std::strcmp(v, "descending") == 0) opt.probeDescending = true;
+            else if (std::strcmp(v, "ascending") == 0) opt.probeDescending = false;
+            else {
+                std::fprintf(stderr, "--probe-order expects ascending or descending\n");
+                exitCode = 1;
+                return false;
+            }
         } else if (a == "--probe-vars") {
             const char* v = need("--probe-vars");
             if (!v || !parseIntArg(v, n, 1, 16)) { exitCode = 1; return false; }
@@ -752,6 +775,9 @@ int main(int argc, char** argv) {
                         opt.cnfPath.c_str(), opt.sigLen, opt.initk, opt.mink, opt.attempts,
                         opt.threads > 0 ? opt.threads
                                         : static_cast<int>(std::thread::hardware_concurrency()));
+            std::printf("mink-unit %s | probe-vars %d | probe-order %s | focus %d\n",
+                        opt.minkWords ? "words" : "samples", opt.probeVars,
+                        opt.probeDescending ? "descending" : "ascending", opt.focusBits);
         }
         RunOutcome r = runInstance(opt, opt.cnfPath, true);
         if (!opt.quiet) {

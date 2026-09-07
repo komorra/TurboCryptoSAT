@@ -82,6 +82,13 @@ bool Signatures::generate(const Cnf& cnf, const std::vector<Lit>& fixedLits,
         return true;
     };
     if (!validate(units) || !validate(cfg.focusLits)) return false;
+    // Numbering gaps are not circuit inputs. Giving them random signatures
+    // wastes redraws and makes inserting unused IDs perturb every real sample.
+    // Explicit fixed/focused values still take precedence.
+    for (Var v = 0; v < numVars_; ++v) {
+        if (!cnf.occurs(v) && requested[static_cast<size_t>(v)] == 0)
+            units.push_back(mkLit(v, false));
+    }
 
     std::vector<int8_t> fixedVals;
     const GateNetwork* net = gateDisabled_ ? nullptr
@@ -747,7 +754,7 @@ void Signatures::generateChunk(const Cnf& cnf, const std::vector<Lit>& fixedLits
                 const size_t idx =
                     static_cast<size_t>(v) * static_cast<size_t>(words) + static_cast<size_t>(w);
                 const uint64_t mask = act & ~def[idx];
-                touched |= assignBits(v, w, mask, rng.next());
+                if (mask) touched |= assignBits(v, w, mask, rng.next());
             }
             if (touched) pushClausesOf(v);
         }
@@ -766,7 +773,7 @@ void Signatures::generateChunk(const Cnf& cnf, const std::vector<Lit>& fixedLits
                 const size_t idx =
                     static_cast<size_t>(v) * static_cast<size_t>(words) + static_cast<size_t>(w);
                 const uint64_t mask = act & ~def[idx];
-                touched |= assignBits(v, w, mask, rng.next());
+                if (mask) touched |= assignBits(v, w, mask, rng.next());
             }
             // Without this the sweep below has an empty queue and the value just
             // written is never propagated - and, worse, the clauses it falsifies

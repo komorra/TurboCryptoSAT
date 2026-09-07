@@ -381,8 +381,10 @@ turbocryptosat sha256_17.cnf \
 | `--out <file>` | Solution path | `<instance>.solution.cnf` |
 | `--siglen <n>` | 64-bit lanes per variable; `n * 64` samples | `1024` |
 | `--initk <n>` | Literals of the assignment each probe filters the samples with; halved on every restart | `6` |
-| `--mink <n>` | Minimum surviving **samples** for a signature verdict — individual lanes, never 64-bit words | `640` |
+| `--mink <n>` | Minimum evidence for a signature verdict, in the unit selected below | `640` |
+| `--mink-unit <samples\|words>` | Count individual samples, or nonempty 64-bit words | `samples` |
 | `--probe-vars <n>` | Variables probed at once, giving `2^n` branches | `1` |
+| `--probe-order <ascending\|descending>` | Direction through occurring variables | `ascending` |
 | `--focus <n>` | Bits of the target valuation every sample must reproduce; lanes that miss one are redrawn until they hit, at a cost of about `2^n` redraws | `8` |
 | `--threads <n>` | Worker threads | hardware threads |
 | `--attempts <n>` | Restarts after a conflict | `5` |
@@ -654,20 +656,16 @@ doubles and the run starts moving. At `initk 7` the verdicts are still plentiful
 *wrong*, and the assignment gets refuted by plain propagation in seconds. `mink 32` — the old
 default — suppresses the layer at every `initk`.
 
-**Read those `mink` numbers as lane words.** The grid was measured when the threshold counted
-64-bit lane words with a survivor in them; the threshold counts *samples* now, and it counts
-nothing else — the unit is fixed in `signatureOutcome` and stated on the option. The default is
-therefore `640`, which is the ten lane words the grid picked, not the bare `10` that number
-would be read as under the new unit.
+**Read those historical `mink` numbers as occupied lane words.** Use `--mink-unit words`
+to select that interpretation. The default remains `--mink-unit samples --mink 640` for
+compatibility, but **ten occupied words are not equivalent to 640 surviving samples**.
+Ten occupied words may contain anywhere from ten to 640 surviving samples. Multiplying the
+prototype's parameter by 64 can therefore suppress useful statistical implications.
 
-The difference between those two readings is the whole parameter. Ten samples is no threshold
-at all: a variable that is constant across n samples is constant by chance with probability
-`2^-(n-1)`, so on a 24 765-variable formula, eleven surviving lanes leave around two dozen
-variables looking implied for no reason whatsoever, every probe. At 640 the same calculation
-gives none. It shows in the bail count — on 17-round SHA-256 the layer bailed 8 times in a
-30 s run at `--mink 10` and about 45 000 times at `--mink 640`, out of the same probe budget.
-Those 45 000 are probes that were producing noise before and now fall back to plain
-propagation.
+Both units are statistical controls, not correctness guarantees. For independent unbiased
+samples a variable is accidentally constant with probability `2^-(n-1)`, but circuit variables
+and rejection-sampled populations need not satisfy those assumptions. Parameter quality must
+be judged by actual progress and verified solutions on the target instance family.
 
 Fixing the unit in samples makes `mink` an *absolute* evidence threshold, which ties it to the
 other two knobs: each of the `initk` filter literals roughly halves the population, so a probe
@@ -684,12 +682,12 @@ from 80 829 to 26 134 and raises the bails from 16 865 to 48 638: not off, but s
 about a third.
 
 Then the solve rate on 17-round SHA-256 (`--attempts 5`, 120 s, six seeds). **These numbers
-predate the unit fix**, so read every `mink` in them as lane words - the row that won is ten
-words, which is today's `--mink 640`:
+predate the unit change**, so read every `mink` in them as lane words and select
+`--mink-unit words` when reproducing them:
 
 | setting | solved | when it did not |
 | --- | --- | --- |
-| `--initk 6 --mink 10` words, i.e. `--mink 640` today | **2 / 6** (71 s, 99 s) | 38–43 % |
+| `--initk 6 --mink 10 --mink-unit words` | **2 / 6** (71 s, 99 s) | 38–43 % |
 | `--initk 6 --mink 8` words | 0 / 6 | 34–50 % |
 | `--initk 8 --mink 32` words (the default before that) | 0 / 6 | 39–45 % |
 

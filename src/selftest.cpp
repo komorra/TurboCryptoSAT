@@ -30,6 +30,123 @@ namespace tcs {
 // Exercise the actual probe with a population valid for the relaxed formula.
 // A sample-derived conflict must reject the branch even when BCP alone accepts it.
 struct SolverTestAccess {
+    static bool checkUnitOnlyTarget() {
+        Cnf cnf;
+        cnf.numVars = 4;
+        cnf.lits = {mkLit(0, true), mkLit(1, false), mkLit(2, false)};
+        cnf.start = {0, 1, 3};
+        cnf.buildOccurrences();
+        Options opt;
+        Solver solver(cnf, opt);
+        solver.unitLits_ = {mkLit(0, true)};
+        std::string error;
+        if (solver.prepareBase(error) != PrepareResult::Ok) return false;
+        solver.buildSampleCnf();
+        solver.collectSortedInit();
+        if (solver.sortedInit_ != solver.unitLits_) return false;
+        SignatureConfig cfg;
+        cfg.words = 2;
+        if (!solver.sig_.generate(solver.sampleCnf_, solver.sampleFixed_, {}, cfg, error)) return false;
+        return solver.sig_.validSamples() == 128 && solver.sig_.var(0)[0] == 0 &&
+               solver.sig_.var(0)[1] == 0;
+    }
+
+    static bool checkNumbering(const Cnf& cnf, uint64_t seed, bool gates) {
+        Cnf sparse = cnf;
+        sparse.numVars = 3 * cnf.numVars + 5;
+        auto map = [](Lit l) { return mkLit(3 * litVar(l) + 2, litSign(l)); };
+        for (Lit& l : sparse.lits) l = map(l);
+        sparse.buildOccurrences();
+        Options opt;
+        opt.mink = 3;
+        opt.minkWords = (seed & 1) != 0;
+        opt.probeDescending = (seed & 2) != 0;
+        opt.probeVars = 3;
+        Solver denseSolver(cnf, opt), sparseSolver(sparse, opt);
+        std::string error;
+        if (denseSolver.prepareBase(error) != PrepareResult::Ok ||
+            sparseSolver.prepareBase(error) != PrepareResult::Ok) return false;
+        GateNetwork denseNet, sparseNet;
+        extractGates(cnf, denseNet);
+        extractGates(sparse, sparseNet);
+        SignatureConfig cfg;
+        cfg.words = 12;
+        cfg.threads = 1 + static_cast<int>(seed & 1);
+        cfg.seed = seed;
+        // The last gate is reachable and can take at least one polarity. Use a
+        // preliminary population to choose one, without reading a solution.
+        Signatures base;
+        cfg.gates = gates ? &denseNet : nullptr;
+        if (!base.generate(cnf, {}, {}, cfg, error)) return false;
+        const Lit target = mkLit(cnf.numVars - 1, !(base.var(cnf.numVars - 1)[0] & 1));
+        if (gates) cfg.focusLits = {target};
+        if (!denseSolver.sig_.generate(cnf, {}, {}, cfg, error)) return false;
+        cfg.gates = gates ? &sparseNet : nullptr;
+        if (gates) cfg.focusLits = {map(target)};
+        if (!sparseSolver.sig_.generate(sparse, {}, {}, cfg, error)) return false;
+        for (int w = 0; w < cfg.words; ++w) {
+            if (denseSolver.sig_.validMask()[w] != sparseSolver.sig_.validMask()[w]) return false;
+            for (Var v : denseSolver.searchVars_) {
+                if (denseSolver.sig_.var(v)[w] != sparseSolver.sig_.var(3 * v + 2)[w])
+                    return false;
+            }
+        }
+        for (Solver* s : {&denseSolver, &sparseSolver}) {
+            const Lit l = s == &denseSolver ? target : map(target);
+            if (!s->master_.enqueue(l) || !s->master_.propagate()) return false;
+            s->effectiveInitk_ = 3;
+            s->collectSortedInit();
+        }
+        std::vector<Lit> mapped;
+        for (Lit l : denseSolver.sortedInit_) mapped.push_back(map(l));
+        if (mapped != sparseSolver.sortedInit_) return false;
+        for (int probe = 0; probe < 12; ++probe) {
+            Solver::Worker a, b;
+            const std::pair<Solver::Worker*, Solver*> jobs[] = {{&a, &denseSolver}, {&b, &sparseSolver}};
+            for (auto p : jobs) {
+                p.first->prop.attach(p.second->cnf_);
+                p.first->rng.reseed(seed + probe);
+                p.first->stamp.assign(p.second->cnf_.numVars, 0);
+                p.first->stampPol.assign(p.second->cnf_.numVars, 0);
+                p.second->runProbe(*p.first);
+            }
+            if (a.hardConflict != b.hardConflict) return false;
+            mapped.clear();
+            for (Lit l : a.result) mapped.push_back(map(l));
+            if (mapped != b.result) return false;
+            if (a.probeVars.size() != b.probeVars.size()) return false;
+            for (size_t i = 0; i < a.probeVars.size(); ++i)
+                if (3 * a.probeVars[i] + 2 != b.probeVars[i]) return false;
+            // Compare the optimized scan with the literal definition of
+            // SigOutcome, including both threshold units and all lane words.
+            std::vector<uint64_t> keep(cfg.words);
+            for (int w = 0; w < cfg.words; ++w) keep[w] = denseSolver.sig_.validMask()[w];
+            for (Lit l : a.forced) {
+                for (int w = 0; w < cfg.words; ++w) {
+                    const uint64_t bits = denseSolver.sig_.var(litVar(l))[w];
+                    keep[w] &= litSign(l) ? ~bits : bits;
+                }
+            }
+            uint64_t evidence = 0;
+            for (uint64_t bits : keep) evidence += opt.minkWords ? (bits != 0) : popcount64(bits);
+            std::vector<Lit> expected, actual;
+            if (evidence <= static_cast<uint64_t>(opt.mink)) expected = a.forced;
+            else for (Var v : denseSolver.searchVars_) {
+                if (a.prop.assigned(v)) continue;
+                bool allTrue = true, allFalse = true;
+                for (int w = 0; w < cfg.words; ++w) {
+                    const uint64_t bits = denseSolver.sig_.var(v)[w] & keep[w];
+                    allTrue = allTrue && bits == keep[w];
+                    allFalse = allFalse && bits == 0;
+                }
+                if (allTrue || allFalse) expected.push_back(mkLit(v, allFalse));
+            }
+            denseSolver.signatureOutcome(a, a.forced, actual);
+            if (expected != actual) return false;
+        }
+        return true;
+    }
+
     static bool check() {
         Cnf cnf;
         cnf.numVars = 3;
@@ -80,6 +197,10 @@ struct Failure {
 };
 
 bool checkRegressions(Failure& fail) {
+    if (!SolverTestAccess::checkUnitOnlyTarget()) {
+        fail.what = "unit-only target was treated as an unused numbering gap";
+        return false;
+    }
     if (!SolverTestAccess::check()) {
         fail.what = "statistical branch conflict or intersection stamp regression";
         return false;
@@ -676,6 +797,18 @@ int runSelfTest(uint64_t seed, int rounds) {
 
     for (int i = 0; i < rounds; ++i) {
         const uint64_t s = seed + static_cast<uint64_t>(i);
+        // This property is heavier than the scalar contracts: it compares two
+        // populations and two probes under an order-preserving sparse renaming.
+        if (i < 200) {
+            Rng rng(s);
+            const Cnf circuit = randomCircuit(rng, 4, 10);
+            if (!SolverTestAccess::checkNumbering(circuit, s, true) ||
+                !SolverTestAccess::checkNumbering(circuit, s, false)) {
+                std::printf("FAIL numbering/signature scan (--seed %llu)\n",
+                            static_cast<unsigned long long>(s));
+                return 1;
+            }
+        }
         if (!checkSampling(s, fail)) {
             std::printf("FAIL sampling round %d (--seed %llu): %s\n", i,
                         static_cast<unsigned long long>(s), fail.what);

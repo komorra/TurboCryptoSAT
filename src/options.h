@@ -20,14 +20,13 @@ struct Options {
     int sigLen = 1024;           // 64-bit lanes per variable (1024 -> 65536 samples)
     int initk = 6;               // literals taken from the current assignment per probe;
                                  // halved on every restart
-    // Minimum surviving samples for a signature verdict, counted in SAMPLES -
-    // individual lanes, the popcount of the surviving lane words - and never in
-    // 64-bit words. 640 is ten full lane words, which is what the tuning grid
-    // behind this default actually measured; ten *samples* is no threshold at
-    // all, since on a formula with 24k variables a dozen lanes leave a couple of
-    // dozen variables looking constant by chance alone.
+    // Minimum evidence for a signature verdict. Preserve the existing sample
+    // default; minkWords selects Piessra's occupied-word count. There is no
+    // fixed conversion between these units after filtering a population.
     int mink = 640;
+    bool minkWords = false;      // true: count nonempty words, as in Piessra
     int probeVars = 1;           // variables probed at once (2^probeVars combinations)
+    bool probeDescending = false; // follow decreasing variable IDs, as in Piessra
 
     // How many bits of the target valuation the sample population has to
     // reproduce. 0 leaves the samples free executions of the circuit, which is
